@@ -1,0 +1,40 @@
+[listen]
+ilp = "0.0.0.0:9009"
+pg = "0.0.0.0:8812"
+
+[[shards]]
+id = 0
+ilp_address = "127.0.0.1:9009"
+pg_address = "127.0.0.1:8812"
+weight = 1
+virtual_nodes = 128
+
+[[shards]]
+id = 1
+ilp_address = "127.0.0.1:9019"
+pg_address = "127.0.0.1:8822"
+weight = 1
+virtual_nodes = 128
+
+[[shards]]
+id = 2
+ilp_address = "127.0.0.1:9029"
+pg_address = "127.0.0.1:8832"
+weight = 1
+virtual_nodes = 128
+
+[routing]
+shard_key = "symbol"
+
+[pg]
+user = "admin"
+password = "quest"
+database = "qdb"
+
+[health_check]
+interval_secs = 5
+timeout_secs = 2
+
+[metrics]
+enabled = true
+address = "127.0.0.1:9090"

@@ -1,0 +1,35 @@
+# Used by docker-compose — router talks to questdb shards on the compose network.
+
+[listen]
+ilp = "0.0.0.0:9009"
+pg = "0.0.0.0:8812"
+
+[[shards]]
+id = 0
+ilp_address = "questdb-0:9009"
+pg_address = "questdb-0:8812"
+weight = 1
+virtual_nodes = 128
+
+[[shards]]
+id = 1
+ilp_address = "questdb-1:9009"
+pg_address = "questdb-1:8812"
+weight = 1
+virtual_nodes = 128
+
+[routing]
+shard_key = "symbol"
+
+[pg]
+user = "admin"
+password = "quest"
+database = "qdb"
+
+[health_check]
+interval_secs = 5
+timeout_secs = 2
+
+[metrics]
+enabled = true
+address = "0.0.0.0:9090"

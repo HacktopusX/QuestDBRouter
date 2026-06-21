@@ -1,0 +1,37 @@
+services:
+  questdb-0:
+    image: questdb/questdb:latest
+    container_name: questdb-0
+    ports:
+      - "19009:9009"
+      - "18812:8812"
+      - "19000:9000"
+    volumes:
+      - questdb-0-data:/var/lib/questdb
+
+  questdb-1:
+    image: questdb/questdb:latest
+    container_name: questdb-1
+    ports:
+      - "19019:9009"
+      - "18822:8812"
+      - "19010:9000"
+    volumes:
+      - questdb-1-data:/var/lib/questdb
+
+  quest-router:
+    build: .
+    container_name: quest-router
+    ports:
+      - "9009:9009"
+      - "8812:8812"
+      - "9090:9090"
+    depends_on:
+      - questdb-0
+      - questdb-1
+    volumes:
+      - ./config/docker-quest-router.toml:/config/quest-router.toml:ro
+
+volumes:
+  questdb-0-data:
+  questdb-1-data:
