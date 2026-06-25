@@ -1,38 +1,37 @@
 use crate::config::ShardConfig;
 use ahash::AHasher;
+use hashring::HashRing;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-/// A point on the consistent-hash ring (one virtual node).
-#[derive(Debug, Clone, Copy)]
-struct RingPoint {
-    hash: u64,
-    shard_idx: usize,
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct VNode {
+    shard_id: u32,
+    vnode_id: u32,
 }
 
 /// Shard selector: consistent hashing over weighted virtual nodes.
 #[derive(Debug, Clone)]
 pub struct ShardRing {
+    ring: Arc<HashRing<VNode>>,
     shards: Arc<Vec<ShardConfig>>,
-    ring: Arc<Vec<RingPoint>>,
 }
 
 impl ShardRing {
     pub fn from_shards(shards: Vec<ShardConfig>) -> Self {
-        let mut ring = Vec::new();
-        for (shard_idx, shard) in shards.iter().enumerate() {
-            let vnode_count = effective_vnode_count(shard);
-            for v in 0..vnode_count {
-                ring.push(RingPoint {
-                    hash: Self::vnode_hash(shard.id, v),
-                    shard_idx,
+        let mut ring = HashRing::new();
+        for shard in &shards {
+            let count = effective_vnode_count(shard);
+            for v in 0..count {
+                ring.add(VNode {
+                    shard_id: shard.id,
+                    vnode_id: v,
                 });
             }
         }
-        ring.sort_by_key(|p| p.hash);
         Self {
-            shards: Arc::new(shards),
             ring: Arc::new(ring),
+            shards: Arc::new(shards),
         }
     }
 
@@ -41,19 +40,23 @@ impl ShardRing {
     }
 
     pub fn vnode_count(&self) -> usize {
-        self.ring.len()
+        self.shards
+            .iter()
+            .map(|s| effective_vnode_count(s) as usize)
+            .sum()
     }
 
     pub fn shard_by_key(&self, key: &str) -> Option<ShardConfig> {
         if self.shards.is_empty() {
             return None;
         }
-        let shard_idx = if self.ring.is_empty() {
-            0
-        } else {
-            self.lookup_shard_idx(Self::hash_key(key))
-        };
-        Some(self.shards[shard_idx].clone())
+        #[derive(Hash)]
+        struct Key<'a>(&'a str);
+        let vnode = self.ring.get(&Key(key))?;
+        self.shards
+            .iter()
+            .find(|s| s.id == vnode.shard_id)
+            .cloned()
     }
 
     pub fn shard_by_id(&self, id: u32) -> Option<ShardConfig> {
@@ -64,20 +67,6 @@ impl ShardRing {
         let mut hasher = AHasher::default();
         key.hash(&mut hasher);
         hasher.finish()
-    }
-
-    fn vnode_hash(shard_id: u32, vnode: u32) -> u64 {
-        let mut hasher = AHasher::default();
-        shard_id.hash(&mut hasher);
-        vnode.hash(&mut hasher);
-        hasher.finish()
-    }
-
-    fn lookup_shard_idx(&self, hash: u64) -> usize {
-        let ring = self.ring.as_ref();
-        let idx = ring.partition_point(|p| p.hash < hash);
-        let idx = if idx >= ring.len() { 0 } else { idx };
-        ring[idx].shard_idx
     }
 }
 

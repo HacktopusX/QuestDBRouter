@@ -33,6 +33,7 @@ log = "0.4"
 fast_log = "1.7"
 metrics = "0.24"
 metrics-exporter-prometheus = "0.17"
+hashring = "0.3"
 memchr = "2"
 clap = { version = "4", features = ["derive"] }
 async-trait = "0.1"
