@@ -3,7 +3,7 @@ name = "quest-router"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-description = "Transparent QuestDB sharding router (ILP writes, PG wire reads)"
+description = "Transparent QuestDB sharding router (ILP writes, datafusion-postgres reads)"
 rust-version = "1.89"
 
 [profile.release]
@@ -11,6 +11,13 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# Fast iteration profile for Docker/local rebuilds (no fat LTO).
+[profile.docker]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -20,21 +27,46 @@ ahash = "0.8"
 anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 config = "0.15"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+log = "0.4"
+fast_log = "1.7"
 metrics = "0.24"
 metrics-exporter-prometheus = "0.17"
-hashring = "0.3"
 memchr = "2"
 clap = { version = "4", features = ["derive"] }
 async-trait = "0.1"
 pgwire = { version = "0.40", default-features = true, features = ["client-api-aws-lc-rs"] }
 mimalloc = { version = "0.1", default-features = false, optional = true }
+sqlparser = "0.62"
+datafusion = { version = "53", optional = true }
+arrow = { version = "58", optional = true }
+arrow-array = { version = "58", optional = true }
+arrow-schema = { version = "58", optional = true }
+postgres-types = { version = "0.2", features = ["with-serde_json-1"] }
+datafusion-postgres = { version = "0.17", optional = true }
+arrow-pg = { version = "0.14", features = ["datafusion"], optional = true }
+chrono = { version = "0.4", default-features = false, features = ["std"], optional = true }
+hex = { version = "0.4", optional = true }
+axum = { version = "0.8", features = ["ws"] }
+rmp-serde = "1"
+dashmap = "6"
+parking_lot = "0.12"
+tower-http = { version = "0.6", features = ["cors"] }
 
 [features]
-default = ["mimalloc"]
+default = ["mimalloc", "federated"]
 mimalloc = ["dep:mimalloc"]
+federated = [
+    "dep:datafusion",
+    "dep:arrow",
+    "dep:arrow-array",
+    "dep:arrow-schema",
+    "dep:datafusion-postgres",
+    "dep:arrow-pg",
+    "dep:chrono",
+    "dep:hex",
+]
 
 [dev-dependencies]
 tokio-test = "0.4"

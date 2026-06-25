@@ -3,6 +3,7 @@
 [listen]
 ilp = "0.0.0.0:9009"
 pg = "0.0.0.0:8812"
+stream = "0.0.0.0:8080"
 
 [[shards]]
 id = 0
@@ -20,6 +21,64 @@ virtual_nodes = 128
 
 [routing]
 shard_key = "symbol"
+federated_enabled = true
+max_federated_rows = 1000000
+scan_allow_order_by = false
+pg_pool_size = 4
+
+[[routing.tables]]
+name = "router_test_trades"
+sharded = true
+columns = [
+  { name = "symbol", type = "symbol" },
+  { name = "price", type = "double" },
+  { name = "volume", type = "double" },
+  { name = "ts", type = "timestamp" },
+]
+
+[[routing.tables]]
+name = "router_test_ohlcv"
+sharded = true
+columns = [
+  { name = "symbol", type = "symbol" },
+  { name = "interval", type = "symbol" },
+  { name = "open", type = "double" },
+  { name = "high", type = "double" },
+  { name = "low", type = "double" },
+  { name = "close", type = "double" },
+  { name = "volume", type = "double" },
+  { name = "ts", type = "timestamp" },
+]
+
+[[routing.tables]]
+name = "join_test_trades"
+sharded = true
+columns = [
+  { name = "symbol", type = "symbol" },
+  { name = "trade_id", type = "long" },
+  { name = "price", type = "double" },
+  { name = "ts", type = "timestamp" },
+]
+
+[[routing.tables]]
+name = "join_test_orders"
+sharded = true
+columns = [
+  { name = "symbol", type = "symbol" },
+  { name = "trade_id", type = "long" },
+  { name = "qty", type = "double" },
+  { name = "ts", type = "timestamp" },
+]
+
+[[routing.tables]]
+name = "ts_test_ticks"
+sharded = true
+columns = [
+  { name = "symbol", type = "symbol" },
+  { name = "price", type = "double" },
+  { name = "volume", type = "double" },
+  { name = "ts", type = "timestamp" },
+]
 
 [pg]
 user = "admin"
@@ -33,3 +92,11 @@ timeout_secs = 2
 [metrics]
 enabled = true
 address = "0.0.0.0:9090"
+
+[stream]
+enabled = true
+broadcast_capacity = 1024
+replay_window = 1000
+topic_tags = ["symbol"]
+topic_missing = "*"
+max_client_lag_drops = 50

@@ -1,5 +1,26 @@
 use memchr::memchr;
 
+/// Zero-copy measurement name from an ILP line (bytes before the first comma or space).
+pub fn measurement_from_ilp_bytes(body: &[u8]) -> Option<&str> {
+    if body.is_empty() {
+        return None;
+    }
+    let end = memchr(b'\n', body).unwrap_or(body.len());
+    let line = &body[..end];
+    let name_end = memchr(b',', line)
+        .unwrap_or(line.len())
+        .min(memchr(b' ', line).unwrap_or(line.len()));
+    if name_end == 0 {
+        return None;
+    }
+    std::str::from_utf8(&line[..name_end]).ok()
+}
+
+/// Measurement name from the first ILP line (bytes before the first comma or space).
+pub fn measurement_from_ilp(body: &[u8]) -> Option<String> {
+    measurement_from_ilp_bytes(body).map(str::to_owned)
+}
+
 /// Extract shard key from Influx line protocol (named tag on first line).
 pub fn shard_key_from_ilp(body: &[u8], tag_name: &str) -> String {
     if body.is_empty() {
@@ -16,7 +37,7 @@ pub fn shard_key_from_ilp(body: &[u8], tag_name: &str) -> String {
         for tag in tag_section.split(|b| *b == b',') {
             if let Some(eq) = memchr(b'=', tag) {
                 let name = &tag[..eq];
-                if name == tag_name.as_bytes() {
+                if tag_name_eq(name, tag_name) {
                     return String::from_utf8_lossy(&tag[eq + 1..]).into_owned();
                 }
             }
@@ -25,38 +46,10 @@ pub fn shard_key_from_ilp(body: &[u8], tag_name: &str) -> String {
     tag_name.to_string()
 }
 
-/// Extract shard key from a SQL statement (WHERE column = value).
-pub fn shard_key_from_sql(query: &str, shard_key_column: &str) -> Option<String> {
-    let needle = shard_key_column.to_ascii_lowercase();
-    let lower = query.to_ascii_lowercase();
-    if let Some(pos) = lower.find(&needle) {
-        let after = &query[pos + needle.len()..];
-        if let Some(eq_pos) = after.find('=') {
-            let value_part = after[eq_pos + 1..].trim();
-            return extract_quoted_or_token(value_part);
-        }
-    }
-    None
-}
-
-fn extract_quoted_or_token(s: &str) -> Option<String> {
-    let s = s.trim();
-    if s.starts_with('\'') {
-        let end = s[1..].find('\'')?;
-        return Some(s[1..1 + end].to_string());
-    }
-    if s.starts_with('"') {
-        let end = s[1..].find('"')?;
-        return Some(s[1..1 + end].to_string());
-    }
-    let end = s
-        .find(|c: char| c.is_whitespace() || c == ',' || c == ';')
-        .unwrap_or(s.len());
-    if end > 0 {
-        Some(s[..end].to_string())
-    } else {
-        None
-    }
+fn tag_name_eq(name: &[u8], tag_name: &str) -> bool {
+    std::str::from_utf8(name)
+        .ok()
+        .is_some_and(|n| n.eq_ignore_ascii_case(tag_name))
 }
 
 #[cfg(test)]
@@ -70,8 +63,17 @@ mod tests {
     }
 
     #[test]
-    fn sql_key_extraction() {
-        let q = "SELECT * FROM trades WHERE symbol = 'ETH-USD'";
-        assert_eq!(shard_key_from_sql(q, "symbol"), Some("ETH-USD".into()));
+    fn ilp_tag_name_is_case_insensitive() {
+        let body = b"trades,Symbol=ETH-USD price=100 1234567890\n";
+        assert_eq!(shard_key_from_ilp(body, "symbol"), "ETH-USD");
+    }
+
+    #[test]
+    fn ilp_measurement_extraction() {
+        let body = b"router_test_ohlcv,symbol=btc-usdt,interval=5m open=1 1\n";
+        assert_eq!(
+            measurement_from_ilp(body).as_deref(),
+            Some("router_test_ohlcv")
+        );
     }
 }

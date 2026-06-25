@@ -3,13 +3,13 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use clap::Parser;
+use quest_router::logging;
 use quest_router::server::run;
-use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
 #[command(
     name = "quest-router",
-    about = "Transparent QuestDB sharding router (ILP writes, PG wire reads)"
+    about = "Transparent QuestDB sharding router (ILP writes, datafusion-postgres reads)"
 )]
 struct Cli {
     /// Path to configuration file
@@ -18,9 +18,7 @@ struct Cli {
 }
 
 fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
-        .init();
+    logging::init()?;
 
     let cli = Cli::parse();
     tokio::runtime::Builder::new_multi_thread()

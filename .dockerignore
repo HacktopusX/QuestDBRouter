@@ -1,0 +1,8 @@
+/target
+/.sccache
+/.git
+/.cursor
+/.codegraph
+/.agents
+**/*.md
+docker-compose.yml

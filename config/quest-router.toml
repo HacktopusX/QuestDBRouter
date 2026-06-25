@@ -25,6 +25,10 @@ virtual_nodes = 128
 
 [routing]
 shard_key = "symbol"
+federated_enabled = true
+max_federated_rows = 1000000
+scan_allow_order_by = false
+pg_pool_size = 4
 
 [pg]
 user = "admin"
@@ -38,3 +42,15 @@ timeout_secs = 2
 [metrics]
 enabled = true
 address = "127.0.0.1:9090"
+
+# Real-time ILP stream over WebSocket (disabled by default).
+# [listen]
+# stream = "127.0.0.1:8080"
+#
+# [stream]
+# enabled = true
+# broadcast_capacity = 1024
+# replay_window = 1000
+# topic_tags = ["symbol"]
+# topic_missing = "*"
+# max_client_lag_drops = 50

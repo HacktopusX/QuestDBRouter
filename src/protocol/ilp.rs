@@ -1,31 +1,31 @@
 use crate::metrics;
-use crate::routing::shard_key_from_ilp;
+use crate::routing::{measurement_from_ilp, shard_key_from_ilp};
 use crate::app::AppState;
 use bytes::BytesMut;
 use std::collections::HashMap;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tracing::{debug, error};
+use log::{debug, error, info};
 
 const READ_BUF: usize = 64 * 1024;
 
 pub async fn serve(state: AppState, listen: std::net::SocketAddr) -> anyhow::Result<()> {
     let listener = TcpListener::bind(listen).await?;
-    tracing::info!(%listen, "ilp listener ready");
+    info!("ilp listener ready on {listen}");
 
     loop {
         let (socket, peer) = listener.accept().await?;
         let state = state.clone();
         tokio::spawn(async move {
             if let Err(e) = handle_connection(socket, state).await {
-                error!(%peer, "ilp connection error: {e:#}");
+                error!("ilp connection error from {peer}: {e:#}");
             }
         });
     }
 }
 
 async fn handle_connection(mut client: TcpStream, state: AppState) -> anyhow::Result<()> {
-    let tag_name = state.config.routing.shard_key.clone();
+    let default_shard_key = state.config.routing.shard_key.clone();
     let mut buf = BytesMut::with_capacity(READ_BUF);
     let mut upstreams: HashMap<u32, TcpStream> = HashMap::new();
 
@@ -41,6 +41,10 @@ async fn handle_connection(mut client: TcpStream, state: AppState) -> anyhow::Re
                 continue;
             }
 
+            let measurement = measurement_from_ilp(&line).unwrap_or_default();
+            let tag_name = state
+                .table_registry
+                .shard_key_for(&measurement, &default_shard_key);
             let key = shard_key_from_ilp(&line, &tag_name);
             let shard = state.route_key(&key);
             let shard_id = shard.id;
@@ -55,11 +59,22 @@ async fn handle_connection(mut client: TcpStream, state: AppState) -> anyhow::Re
             };
 
             upstream.write_all(&line).await?;
-            upstream.flush().await?;
+
+            if let Some(hub) = &state.stream {
+                hub.publish(&line);
+            }
 
             metrics::record_request("write", Some(shard_id));
-            debug!(shard_id, %key, lines = 1, "ilp line routed");
+            debug!("ilp line routed shard_id={shard_id} key={key} lines=1");
         }
+
+        for upstream in upstreams.values_mut() {
+            upstream.flush().await?;
+        }
+    }
+
+    for upstream in upstreams.values_mut() {
+        let _ = upstream.flush().await;
     }
 
     Ok(())
