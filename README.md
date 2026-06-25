@@ -29,6 +29,10 @@ python scripts/test_router.py
 
 Configuration lives under `config/`. See `config/docker-quest-router.toml` for a working local setup.
 
+## Contributing
+
+Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for architecture notes, local development setup, and how to open a pull request.
+
 ## Todo
 
 - [ ] Exclude unhealthy shards from routing (health checks today are log-only)
