@@ -1,0 +1,25 @@
+# Heap — keep modest; most QuestDB memory is off-heap + page cache
+-Xms4g
+-Xmx12g
+
+# GC — ZGC with generational mode (requires JDK 21+; drop +ZGenerational on JDK 17)
+-XX:+UseZGC
+-XX:+ZGenerational
+-XX:ZCollectionInterval=5
+-XX:+AlwaysPreTouch
+
+# Direct / off-heap memory — sorts, joins, window functions, ILP buffers
+# Budget: 64 GB - 12 GB heap - ~35 GB page cache = ~17 GB safe ceiling
+-XX:MaxDirectMemorySize=16g
+
+# Linux epoll selector (never leave this to autodetect on Linux)
+-Djava.nio.channels.spi.SelectorProvider=sun.nio.ch.EPollSelectorProvider
+
+# Disable biased locking (deprecated in JDK 17+, harmful in JDK 21)
+-XX:-UseBiasedLocking
+
+# JVM thread stack
+-Xss512k
+
+# GC logging (optional, remove in prod if noisy)
+-Xlog:gc*:file=/var/lib/questdb/log/gc.log:time,uptime:filecount=5,filesize=20m

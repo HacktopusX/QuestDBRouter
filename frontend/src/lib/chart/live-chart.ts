@@ -5,7 +5,6 @@ import {
   CrosshairMode,
   HistogramSeries,
   LineSeries,
-  type CandlestickData,
   type HistogramData,
   type IChartApi,
   type ISeriesApi,
@@ -13,37 +12,16 @@ import {
   type MouseEventParams,
   type UTCTimestamp,
 } from "lightweight-charts";
-import { ChartLegend, type LegendValues } from "./chart-legend";
-import { smaAt, upsertClose, type ClosePoint } from "./indicators";
-import type { ChartMode, IlpRow } from "./types";
-import { fieldNumber, fieldsToMap, toChartTime } from "./types";
+import { SMA_PERIOD, smaAt, upsertClose, type ClosePoint } from "@/lib/chart/indicators";
+import { CHART_THEME } from "@/lib/chart/theme";
+import type { ChartMode, IlpRow } from "@/lib/ilp/types";
+import { fieldNumber, fieldsToMap, toChartTime } from "@/lib/ilp/types";
+import { formatLegendTime } from "@/lib/utils";
+import type { ChartFeatures, LegendValues, PriceChange } from "@/types/terminal";
 
-const THEME = {
-  background: "#0b0e11",
-  surface: "#131722",
-  grid: "#1e222d",
-  text: "#d1d4dc",
-  muted: "#787b86",
-  up: "#26a69a",
-  down: "#ef5350",
-  line: "#2962ff",
-  sma: "#f7931a",
-  crosshair: "#758696",
-};
-
-const SMA_PERIOD = 20;
 const ROW_BUFFER_MAX = 500;
 
-export interface ChartFeatures {
-  volume: boolean;
-  sma: boolean;
-  autoFollow: boolean;
-}
-
-export interface PriceChange {
-  absolute: number;
-  percent: number;
-}
+export type { ChartFeatures, PriceChange, LegendValues };
 
 export class LiveChart {
   private chart: IChartApi;
@@ -56,37 +34,42 @@ export class LiveChart {
   private closes: ClosePoint[] = [];
   private rowBuffer: IlpRow[] = [];
   private sessionOpen: number | null = null;
-  private legend: ChartLegend;
   private onChange: ((change: PriceChange | null) => void) | null = null;
+  private onLegend: ((values: LegendValues | null) => void) | null = null;
   private crosshairHandler: (param: MouseEventParams) => void;
+  private resizeObserver: ResizeObserver;
+  private container: HTMLElement;
 
-  constructor(container: HTMLElement, legendContainer: HTMLElement) {
-    this.legend = new ChartLegend(legendContainer);
+  constructor(
+    container: HTMLElement,
+    onLegend?: (values: LegendValues | null) => void,
+  ) {
+    this.container = container;
+    this.onLegend = onLegend ?? null;
     this.chart = createChart(container, {
       layout: {
-        background: { type: ColorType.Solid, color: THEME.surface },
-        textColor: THEME.text,
-        fontFamily: "'IBM Plex Sans', system-ui, sans-serif",
+        background: { type: ColorType.Solid, color: CHART_THEME.panel },
+        textColor: CHART_THEME.text,
+        fontFamily: CHART_THEME.sans,
         fontSize: 12,
+        attributionLogo: false,
         panes: {
-          separatorColor: THEME.grid,
+          separatorColor: CHART_THEME.grid,
           separatorHoverColor: "#434651",
         },
       },
       grid: {
-        vertLines: { color: THEME.grid },
-        horzLines: { color: THEME.grid },
+        vertLines: { color: CHART_THEME.grid },
+        horzLines: { color: CHART_THEME.grid },
       },
       crosshair: {
         mode: CrosshairMode.Normal,
-        vertLine: { color: THEME.crosshair, labelBackgroundColor: "#2a2e39" },
-        horzLine: { color: THEME.crosshair, labelBackgroundColor: "#2a2e39" },
+        vertLine: { color: CHART_THEME.crosshair, labelBackgroundColor: "#1a1a1a" },
+        horzLine: { color: CHART_THEME.crosshair, labelBackgroundColor: "#1a1a1a" },
       },
-      rightPriceScale: {
-        borderColor: THEME.grid,
-      },
+      rightPriceScale: { borderColor: CHART_THEME.grid },
       timeScale: {
-        borderColor: THEME.grid,
+        borderColor: CHART_THEME.grid,
         timeVisible: true,
         secondsVisible: true,
       },
@@ -97,25 +80,27 @@ export class LiveChart {
     this.crosshairHandler = (param) => this.onCrosshairMove(param);
     this.chart.subscribeCrosshairMove(this.crosshairHandler);
 
-    const ro = new ResizeObserver(() => {
+    this.resizeObserver = new ResizeObserver(() => {
       const { width, height } = container.getBoundingClientRect();
       this.chart.applyOptions({ width, height });
     });
-    ro.observe(container);
+    this.resizeObserver.observe(container);
   }
 
   setFeatures(features: Partial<ChartFeatures>): void {
     const prev = { ...this.features };
     this.features = { ...this.features, ...features };
-    const needsRebuild =
-      prev.volume !== this.features.volume || prev.sma !== this.features.sma;
-    if (needsRebuild) {
+    if (prev.volume !== this.features.volume || prev.sma !== this.features.sma) {
       this.replayBuffer();
     }
   }
 
   setOnPriceChange(handler: (change: PriceChange | null) => void): void {
     this.onChange = handler;
+  }
+
+  setOnLegend(handler: (values: LegendValues | null) => void): void {
+    this.onLegend = handler;
   }
 
   setMode(mode: ChartMode): void {
@@ -129,12 +114,43 @@ export class LiveChart {
     this.rowBuffer = [];
     this.sessionOpen = null;
     this.onChange?.(null);
+    this.onLegend?.(null);
     this.resetSeries();
-    this.legend.hide();
   }
 
   fitContent(): void {
     this.chart.timeScale().fitContent();
+  }
+
+  resize(): void {
+    const { width, height } = this.container.getBoundingClientRect();
+    if (width > 0 && height > 0) {
+      this.chart.applyOptions({ width, height });
+    }
+  }
+
+  zoomIn(): void {
+    this.zoomLogical(0.72);
+  }
+
+  zoomOut(): void {
+    this.zoomLogical(1.38);
+  }
+
+  resetZoom(): void {
+    this.chart.timeScale().resetTimeScale();
+  }
+
+  private zoomLogical(factor: number): void {
+    const range = this.chart.timeScale().getVisibleLogicalRange();
+    if (!range) return;
+    const span = range.to - range.from;
+    const center = (range.from + range.to) / 2;
+    const newSpan = Math.max(span * factor, 2);
+    this.chart.timeScale().setVisibleLogicalRange({
+      from: center - newSpan / 2,
+      to: center + newSpan / 2,
+    });
   }
 
   applyReplay(rows: IlpRow[]): void {
@@ -163,14 +179,13 @@ export class LiveChart {
       if (!this.candleSeries) this.resetSeries();
       if (!this.candleSeries) return null;
 
-      const bar: CandlestickData = {
+      this.candleSeries.update({
         time: time as UTCTimestamp,
         open,
         high,
         low,
         close,
-      };
-      this.candleSeries.update(bar);
+      });
       this.updateVolume(time as UTCTimestamp, fieldNumber(fields, "volume"), open, close);
       this.updateSma(time as UTCTimestamp, close, scroll);
       this.trackPrice(close, scroll);
@@ -188,16 +203,14 @@ export class LiveChart {
   }
 
   destroy(): void {
+    this.resizeObserver.disconnect();
     this.chart.unsubscribeCrosshairMove(this.crosshairHandler);
-    this.legend.destroy();
     this.chart.remove();
   }
 
   private bufferRow(row: IlpRow): void {
     this.rowBuffer.push(row);
-    if (this.rowBuffer.length > ROW_BUFFER_MAX) {
-      this.rowBuffer.shift();
-    }
+    if (this.rowBuffer.length > ROW_BUFFER_MAX) this.rowBuffer.shift();
   }
 
   private replayBuffer(): void {
@@ -206,46 +219,34 @@ export class LiveChart {
     this.sessionOpen = null;
     this.rowBuffer = [];
     this.resetSeries();
-    for (const row of rows) {
-      this.applyRow(row, false);
-    }
+    for (const row of rows) this.applyRow(row, false);
   }
 
   private resetSeries(): void {
-    if (this.candleSeries) {
-      this.chart.removeSeries(this.candleSeries);
-      this.candleSeries = null;
+    for (const s of [this.candleSeries, this.lineSeries, this.volumeSeries, this.smaSeries]) {
+      if (s) this.chart.removeSeries(s);
     }
-    if (this.lineSeries) {
-      this.chart.removeSeries(this.lineSeries);
-      this.lineSeries = null;
-    }
-    if (this.volumeSeries) {
-      this.chart.removeSeries(this.volumeSeries);
-      this.volumeSeries = null;
-    }
-    if (this.smaSeries) {
-      this.chart.removeSeries(this.smaSeries);
-      this.smaSeries = null;
-    }
+    this.candleSeries = null;
+    this.lineSeries = null;
+    this.volumeSeries = null;
+    this.smaSeries = null;
 
     if (this.mode === "ohlcv") {
       this.candleSeries = this.chart.addSeries(CandlestickSeries, {
-        upColor: THEME.up,
-        downColor: THEME.down,
-        borderUpColor: THEME.up,
-        borderDownColor: THEME.down,
-        wickUpColor: THEME.up,
-        wickDownColor: THEME.down,
+        upColor: CHART_THEME.up,
+        downColor: CHART_THEME.down,
+        borderUpColor: CHART_THEME.up,
+        borderDownColor: CHART_THEME.down,
+        wickUpColor: CHART_THEME.up,
+        wickDownColor: CHART_THEME.down,
+        lastValueVisible: false,
+        priceLineVisible: false,
       });
 
       if (this.features.volume) {
         this.volumeSeries = this.chart.addSeries(
           HistogramSeries,
-          {
-            priceFormat: { type: "volume" },
-            priceScaleId: "",
-          },
+          { priceFormat: { type: "volume" }, priceScaleId: "" },
           1,
         );
         const panes = this.chart.panes();
@@ -257,7 +258,7 @@ export class LiveChart {
 
       if (this.features.sma) {
         this.smaSeries = this.chart.addSeries(LineSeries, {
-          color: THEME.sma,
+          color: CHART_THEME.sma,
           lineWidth: 1,
           priceLineVisible: false,
           lastValueVisible: false,
@@ -266,14 +267,15 @@ export class LiveChart {
       }
     } else {
       this.lineSeries = this.chart.addSeries(LineSeries, {
-        color: THEME.line,
+        color: CHART_THEME.line,
         lineWidth: 2,
-        crosshairMarkerRadius: 4,
+        crosshairMarkerRadius: 3,
+        lastValueVisible: false,
+        priceLineVisible: false,
       });
-
       if (this.features.sma) {
         this.smaSeries = this.chart.addSeries(LineSeries, {
-          color: THEME.sma,
+          color: CHART_THEME.sma,
           lineWidth: 1,
           priceLineVisible: false,
           lastValueVisible: false,
@@ -284,11 +286,8 @@ export class LiveChart {
   }
 
   private pushLine(time: UTCTimestamp, price: number, scroll: boolean): void {
-    const point: LineData = { time, value: price };
-    this.lineSeries!.update(point);
-    if (scroll && this.features.autoFollow) {
-      this.chart.timeScale().scrollToRealTime();
-    }
+    this.lineSeries!.update({ time, value: price } as LineData);
+    if (scroll && this.features.autoFollow) this.chart.timeScale().scrollToRealTime();
   }
 
   private updateVolume(
@@ -301,7 +300,7 @@ export class LiveChart {
     const bar: HistogramData = {
       time,
       value: volume,
-      color: close >= open ? THEME.up : THEME.down,
+      color: close >= open ? CHART_THEME.up : CHART_THEME.down,
     };
     this.volumeSeries.update(bar);
   }
@@ -312,32 +311,24 @@ export class LiveChart {
     const sma = smaAt(this.closes, SMA_PERIOD);
     if (sma == null) return;
     this.smaSeries.update({ time, value: sma });
-    if (scroll && this.features.autoFollow) {
-      this.chart.timeScale().scrollToRealTime();
-    }
+    if (scroll && this.features.autoFollow) this.chart.timeScale().scrollToRealTime();
   }
 
   private trackPrice(price: number, scroll: boolean): void {
     if (this.sessionOpen == null) this.sessionOpen = price;
-    if (this.sessionOpen != null) {
-      const absolute = price - this.sessionOpen;
-      const percent = (absolute / this.sessionOpen) * 100;
-      this.onChange?.({ absolute, percent });
-    }
-    if (scroll && this.features.autoFollow) {
-      this.chart.timeScale().scrollToRealTime();
-    }
+    const absolute = price - this.sessionOpen;
+    const percent = (absolute / this.sessionOpen) * 100;
+    this.onChange?.({ absolute, percent });
+    if (scroll && this.features.autoFollow) this.chart.timeScale().scrollToRealTime();
   }
 
   private onCrosshairMove(param: MouseEventParams): void {
     if (!param.time || !param.point) {
-      this.legend.hide();
+      this.onLegend?.(null);
       return;
     }
 
-    const values: LegendValues = {
-      time: formatLegendTime(param.time as number),
-    };
+    const values: LegendValues = { time: formatLegendTime(param.time as number) };
 
     if (this.candleSeries) {
       const data = param.seriesData.get(this.candleSeries);
@@ -348,39 +339,19 @@ export class LiveChart {
         values.close = data.close;
       }
     }
-
     if (this.lineSeries) {
       const data = param.seriesData.get(this.lineSeries);
-      if (data && "value" in data) {
-        values.price = data.value;
-      }
+      if (data && "value" in data) values.price = data.value;
     }
-
     if (this.volumeSeries) {
       const data = param.seriesData.get(this.volumeSeries);
-      if (data && "value" in data) {
-        values.volume = data.value;
-      }
+      if (data && "value" in data) values.volume = data.value;
     }
-
     if (this.smaSeries) {
       const data = param.seriesData.get(this.smaSeries);
-      if (data && "value" in data) {
-        values.sma = data.value;
-      }
+      if (data && "value" in data) values.sma = data.value;
     }
 
-    this.legend.show(this.mode, values);
+    this.onLegend?.(values);
   }
-}
-
-function formatLegendTime(epochSec: number): string {
-  const d = new Date(epochSec * 1000);
-  return d.toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  });
 }

@@ -1,65 +1,18 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" class="dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Quest Router — Live Charts</title>
+    <title>Quest Router — Trading Terminal</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap"
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap"
       rel="stylesheet"
     />
   </head>
   <body>
-    <div id="app">
-      <header class="toolbar">
-        <div class="brand">
-          <span class="brand-dot"></span>
-          <span class="brand-title">Quest Router</span>
-        </div>
-        <label class="field">
-          <span>Symbol</span>
-          <input id="topic-input" type="text" value="btc-usdt" spellcheck="false" />
-        </label>
-        <label class="field">
-          <span>Mode</span>
-          <select id="mode-select">
-            <option value="ohlcv">OHLCV candles</option>
-            <option value="line">Price line</option>
-          </select>
-        </label>
-        <button id="connect-btn" type="button">Connect</button>
-        <div class="status">
-          <span id="status-dot" class="status-dot disconnected"></span>
-          <span id="status-text">Disconnected</span>
-        </div>
-        <div class="stats">
-          <span id="tick-count">0 ticks</span>
-          <span id="last-price">—</span>
-          <span id="change-pct" class="change-pct">—</span>
-        </div>
-      </header>
-      <div class="chart-controls">
-        <label class="toggle">
-          <input id="volume-toggle" type="checkbox" checked />
-          <span>Volume</span>
-        </label>
-        <label class="toggle">
-          <input id="sma-toggle" type="checkbox" />
-          <span>SMA (20)</span>
-        </label>
-        <label class="toggle">
-          <input id="follow-toggle" type="checkbox" checked />
-          <span>Auto-follow</span>
-        </label>
-        <button id="fit-btn" type="button" class="ghost-btn">Fit</button>
-      </div>
-      <main class="chart-wrap">
-        <div id="chart-legend-host" class="chart-legend-host"></div>
-        <div id="chart"></div>
-      </main>
-    </div>
-    <script type="module" src="/src/main.ts"></script>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

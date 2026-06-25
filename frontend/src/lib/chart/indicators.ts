@@ -5,6 +5,8 @@ export interface ClosePoint {
   close: number;
 }
 
+export const SMA_PERIOD = 20;
+
 export function upsertClose(points: ClosePoint[], time: UTCTimestamp, close: number): void {
   const last = points[points.length - 1];
   if (last && last.time === time) {

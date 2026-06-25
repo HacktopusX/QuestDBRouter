@@ -25,7 +25,6 @@ export function fieldsToMap(fields: [string, IlpField][]): Map<string, IlpField>
 
 export function toChartTime(timestampNs: number | null): number | null {
   if (timestampNs == null) return null;
-  // QuestDB ILP timestamps are typically nanoseconds; fall back if already seconds/ms.
   if (timestampNs > 1e18) return Math.floor(timestampNs / 1_000_000_000);
   if (timestampNs > 1e15) return Math.floor(timestampNs / 1_000_000);
   if (timestampNs > 1e12) return Math.floor(timestampNs / 1_000);
@@ -40,4 +39,10 @@ export function fieldNumber(fields: Map<string, IlpField>, name: string): number
     return Number.isFinite(n) ? n : null;
   }
   return null;
+}
+
+export function lastPriceFromRow(row: IlpRow): number | null {
+  const fields = fieldsToMap(row.fields);
+  const close = fields.get("close") ?? fields.get("price");
+  return typeof close === "number" ? close : null;
 }
