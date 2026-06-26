@@ -1,4 +1,5 @@
 use crate::app::AppState;
+use crate::metadata::MetadataProvider;
 use crate::metrics;
 use crate::pool::ShardPgPool;
 use pgwire::api::client::auth::DefaultStartupHandler;
@@ -27,6 +28,10 @@ pub(crate) fn read_only_err() -> PgWireError {
     )))
 }
 
+pub(crate) fn routing_err(err: crate::routing::RoutingError) -> PgWireError {
+    err.to_pgwire()
+}
+
 struct ConnBackendState {
     backends: HashMap<u32, PgWireClient>,
     current_shard: Option<u32>,
@@ -48,7 +53,12 @@ fn conn_state<C: ClientInfo + ?Sized>(client: &C) -> Arc<Mutex<ConnBackendState>
 }
 
 fn default_shard_id(state: &AppState) -> u32 {
-    state.config.shards[0].id
+    state
+        .metadata
+        .snapshot()
+        .default_healthy_shard(crate::metadata::Protocol::Pg)
+        .map(|s| s.id)
+        .unwrap_or(state.config.shards[0].id)
 }
 
 fn resolve_shard_id(state: &AppState, current: Option<u32>) -> u32 {
@@ -64,9 +74,10 @@ async fn connect_backend<'a>(
 
     if let Entry::Vacant(entry) = conn.backends.entry(shard_id) {
         let shard = state
-            .shard_ring
-            .shard_by_id(shard_id)
-            .ok_or_else(|| wire_err("shard not found"))?;
+            .metadata
+            .snapshot()
+            .shard_by_id(shard_id, crate::metadata::Protocol::Pg)
+            .map_err(routing_err)?;
         let config = state
             .backend_pg_config(&shard)
             .map_err(|e| wire_err(e.to_string()))?;

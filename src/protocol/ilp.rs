@@ -1,11 +1,13 @@
 use crate::metrics;
+use crate::metadata::{MetadataProvider, Protocol};
 use crate::routing::{measurement_from_ilp, shard_key_from_ilp};
 use crate::app::AppState;
 use bytes::BytesMut;
+use log::{debug, error, info};
 use std::collections::HashMap;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use log::{debug, error, info};
+use tracing::instrument;
 
 const READ_BUF: usize = 64 * 1024;
 
@@ -25,7 +27,6 @@ pub async fn serve(state: AppState, listen: std::net::SocketAddr) -> anyhow::Res
 }
 
 async fn handle_connection(mut client: TcpStream, state: AppState) -> anyhow::Result<()> {
-    let default_shard_key = state.config.routing.shard_key.clone();
     let mut buf = BytesMut::with_capacity(READ_BUF);
     let mut upstreams: HashMap<u32, TcpStream> = HashMap::new();
 
@@ -43,10 +44,12 @@ async fn handle_connection(mut client: TcpStream, state: AppState) -> anyhow::Re
 
             let measurement = measurement_from_ilp(&line).unwrap_or_default();
             let tag_name = state
-                .table_registry
-                .shard_key_for(&measurement, &default_shard_key);
+                .metadata
+                .snapshot()
+                .table_registry()
+                .shard_key_for(&measurement, state.metadata.default_shard_key());
             let key = shard_key_from_ilp(&line, &tag_name);
-            let shard = state.route_key(&key);
+            let shard = route_ilp_line(&state, &key)?;
             let shard_id = shard.id;
 
             let upstream = match upstreams.get_mut(&shard_id) {
@@ -78,4 +81,15 @@ async fn handle_connection(mut client: TcpStream, state: AppState) -> anyhow::Re
     }
 
     Ok(())
+}
+
+#[instrument(name = "ilp.route", skip(state), fields(shard_id, key))]
+fn route_ilp_line(
+    state: &AppState,
+    key: &str,
+) -> Result<crate::config::ShardConfig, crate::routing::RoutingError> {
+    let shard = state.route_key(key, Protocol::Ilp)?;
+    tracing::Span::current().record("shard_id", shard.id);
+    tracing::Span::current().record("key", key);
+    Ok(shard)
 }

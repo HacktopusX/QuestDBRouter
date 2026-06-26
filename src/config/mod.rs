@@ -153,6 +153,18 @@ pub struct HealthCheckConfig {
     pub interval_secs: u64,
     #[serde(default = "default_health_timeout")]
     pub timeout_secs: u64,
+    #[serde(default = "default_exclude_unhealthy")]
+    pub exclude_unhealthy: bool,
+    #[serde(default = "default_min_healthy_shards")]
+    pub min_healthy_shards: usize,
+}
+
+fn default_exclude_unhealthy() -> bool {
+    true
+}
+
+fn default_min_healthy_shards() -> usize {
+    1
 }
 
 fn default_health_interval() -> u64 {

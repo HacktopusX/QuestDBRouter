@@ -38,6 +38,8 @@ database = "qdb"
 [health_check]
 interval_secs = 5
 timeout_secs = 2
+exclude_unhealthy = true
+min_healthy_shards = 1
 
 [metrics]
 enabled = true

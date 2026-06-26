@@ -63,6 +63,7 @@ fn is_passthrough_statement(stmt: &Statement) -> bool {
 }
 
 /// Classify SQL for PGWire handling.
+#[tracing::instrument(name = "pg.classify", skip(registry), fields(table))]
 pub fn classify_sql(
     sql: &str,
     shard_key_column: &str,
@@ -75,13 +76,23 @@ pub fn classify_sql(
     }
 
     match statement {
-        Statement::Query(query) => Ok(SqlClassify::Routable(plan_query(
-            &query,
-            sql,
-            shard_key_column,
-            registry,
-            scan_allow_order_by,
-        )?)),
+        Statement::Query(query) => {
+            let plan = plan_query(
+                &query,
+                sql,
+                shard_key_column,
+                registry,
+                scan_allow_order_by,
+            )?;
+            if let RoutePlan::SingleShard { ref table, .. }
+            | RoutePlan::FullScan { ref table }
+            | RoutePlan::AggregateScan { ref table, .. }
+            | RoutePlan::GroupBy { ref table, .. } = plan
+            {
+                tracing::Span::current().record("table", table.as_str());
+            }
+            Ok(SqlClassify::Routable(plan))
+        }
         _ => Err(SqlRouteError::Unsupported(
             "only read queries (SELECT) are routed via SQL parser".into(),
         )),
@@ -471,6 +482,24 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(plan, RoutePlan::GroupBy { .. }));
+    }
+
+    #[test]
+    fn count_with_shard_key_is_single_shard() {
+        let plan = plan_sql(
+            "SELECT count() FROM router_test_trades WHERE symbol = 'HEALTH-TEST-SYM'",
+            "symbol",
+            &registry(),
+            false,
+        )
+        .unwrap();
+        assert!(matches!(
+            plan,
+            RoutePlan::SingleShard {
+                shard_key: Some(ref k),
+                ..
+            } if k == "HEALTH-TEST-SYM"
+        ));
     }
 
     #[test]

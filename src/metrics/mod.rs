@@ -42,6 +42,10 @@ pub fn init(config_enabled: bool, listen: Option<SocketAddr>) -> anyhow::Result<
         "quest_router_stream_client_dropped_total",
         "Stream clients disconnected due to excessive lag"
     );
+    describe_gauge!(
+        "quest_router_shard_healthy",
+        "Shard health probe status (1=healthy, 0=unhealthy)"
+    );
 
     if config_enabled {
         let addr = listen.unwrap_or_else(|| "127.0.0.1:9090".parse().expect("valid addr"));
@@ -108,4 +112,13 @@ pub fn record_stream_client_lagged() {
 
 pub fn record_stream_client_dropped() {
     counter!("quest_router_stream_client_dropped_total").increment(1);
+}
+
+pub fn record_shard_health(shard_id: u32, protocol: &str, healthy: bool) {
+    gauge!(
+        "quest_router_shard_healthy",
+        "shard" => shard_id.to_string(),
+        "protocol" => protocol.to_string(),
+    )
+    .set(if healthy { 1.0 } else { 0.0 });
 }

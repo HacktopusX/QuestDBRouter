@@ -10,14 +10,15 @@ use datafusion_postgres::hooks::{HookClient, QueryHook};
 use pgwire::api::results::Response;
 use pgwire::api::ClientInfo;
 use pgwire::error::PgWireResult;
+use tracing::instrument;
 
 use crate::app::{AppState, ResolvedRoute};
 use crate::federated::catalog::TableCatalog;
 use crate::metrics;
-use crate::routing::{classify_sql, RoutePlan, SqlClassify, SqlRouteError};
+use crate::routing::RoutingError;
 
 use super::pg_backend::{
-    inline_sql_params, query_shard_pool, read_only_err, relay_passthrough, wire_err,
+    inline_sql_params, query_shard_pool, read_only_err, relay_passthrough, routing_err, wire_err,
 };
 
 pub struct RouterQueryHook {
@@ -46,40 +47,18 @@ impl RouterQueryHook {
         &self,
         sql: &str,
         params: Option<&[String]>,
-    ) -> Option<Result<ResolvedRoute, SqlRouteError>> {
-        let routing = &self.state.config.routing;
-        let classified = classify_sql(
-            sql,
-            &routing.shard_key,
-            &self.state.table_registry,
-            // DataFusion applies ORDER BY / LIMIT after federated merge.
-            true,
-        );
+    ) -> Option<Result<ResolvedRoute, RoutingError>> {
+        let resolved = self.state.resolve_route(sql, params);
 
-        match classified {
-            Ok(SqlClassify::Passthrough) => Some(Ok(ResolvedRoute::Passthrough)),
-            Ok(SqlClassify::Routable(plan)) => match plan {
-                RoutePlan::SingleShard {
-                    table,
-                    shard_key,
-                    shard_key_param,
-                } => {
-                    let key = if let Some(idx) = shard_key_param {
-                        params
-                            .and_then(|p| p.get(idx))
-                            .cloned()
-                            .unwrap_or_else(|| table.clone())
-                    } else {
-                        shard_key.unwrap_or_else(|| table.clone())
-                    };
-                    Some(Ok(ResolvedRoute::Single(self.state.route_key(&key))))
-                }
-                _ => None,
-            },
-            Err(SqlRouteError::Unsupported(msg)) if msg.contains("only read queries") => {
-                Some(Err(SqlRouteError::Unsupported(msg)))
+        match resolved {
+            Ok(ResolvedRoute::Passthrough) => Some(Ok(ResolvedRoute::Passthrough)),
+            Ok(ResolvedRoute::Single(_)) => Some(resolved),
+            Ok(ResolvedRoute::Federated(_)) => None,
+            Err(RoutingError::Unsupported(msg)) if msg.contains("only read queries") => {
+                Some(Err(RoutingError::Unsupported(msg)))
             }
-            Err(_) => None,
+            Err(RoutingError::Parse(_)) | Err(RoutingError::Unsupported(_)) => None,
+            Err(e) => Some(Err(e)),
         }
     }
 
@@ -122,6 +101,7 @@ impl RouterQueryHook {
         }
     }
 
+    #[instrument(name = "pg.route", skip(self, client), fields(shard_id))]
     async fn handle_routed_sql(
         &self,
         sql: &str,
@@ -130,25 +110,24 @@ impl RouterQueryHook {
     ) -> Option<PgWireResult<Response>> {
         let resolved = match self.try_resolve_hook_route(sql, params) {
             None => return None,
-            Some(Err(SqlRouteError::Unsupported(msg))) if msg.contains("only read queries") => {
+            Some(Err(RoutingError::Unsupported(msg))) if msg.contains("only read queries") => {
                 return Some(Err(read_only_err()));
             }
-            Some(Err(e)) => return Some(Err(wire_err(e.to_string()))),
+            Some(Err(e)) => return Some(Err(routing_err(e))),
             Some(Ok(route)) => route,
         };
 
         match resolved {
-            ResolvedRoute::Passthrough => {
-                Some(relay_passthrough(&self.state, client, sql).await)
-            }
+            ResolvedRoute::Passthrough => Some(relay_passthrough(&self.state, client, sql).await),
             ResolvedRoute::Single(shard) => {
+                tracing::Span::current().record("shard_id", shard.id);
                 metrics::record_request("read", Some(shard.id));
                 let backend_sql = match params {
                     Some(ps) if !ps.is_empty() => inline_sql_params(sql, ps),
                     _ => sql.to_string(),
                 };
                 let responses = query_shard_pool(&self.state.pg_pool, shard.id, &backend_sql).await;
-                Some(responses.and_then(|r| crate::protocol::pg_backend::first_response(r)))
+                Some(responses.and_then(|r| super::pg_backend::first_response(r)))
             }
             ResolvedRoute::Federated(_) => None,
         }
@@ -218,10 +197,12 @@ impl QueryHook for RouterQueryHook {
                     Some(Ok(Self::dummy_plan()))
                 }
                 Some(Ok(ResolvedRoute::Federated(_))) => None,
-                Some(Err(SqlRouteError::Unsupported(msg))) if msg.contains("only read queries") => {
+                Some(Err(RoutingError::Unsupported(msg)))
+                    if msg.contains("only read queries") =>
+                {
                     Some(Err(read_only_err()))
                 }
-                Some(Err(e)) => Some(Err(wire_err(e.to_string()))),
+                Some(Err(e)) => Some(Err(routing_err(e))),
             }
         })
     }

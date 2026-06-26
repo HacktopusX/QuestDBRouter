@@ -96,7 +96,7 @@ impl TableCatalog {
             let provider = QuestDbShardTableProvider::new(
                 name.clone(),
                 self.executor.clone(),
-                self.state.table_registry.clone(),
+                self.state.table_registry(),
                 self.state.config.routing.shard_key.clone(),
                 schema,
             );
@@ -114,7 +114,7 @@ impl TableCatalog {
                 continue;
             }
             let table = bare_table_name(&qualified);
-            if self.state.table_registry.get(table).is_none() {
+            if self.state.table_registry().get(table).is_none() {
                 anyhow::bail!("table {table} is not configured in routing.tables");
             }
             if !self.ctx.table_exist(table)? {

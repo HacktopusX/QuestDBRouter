@@ -1,0 +1,93 @@
+services:
+  questdb-0:
+    image: questdb/questdb:latest
+    container_name: questdb-0
+    # Docker Desktop/WSL pins vm.max_map_count=262144; raise it before QuestDB starts.
+    privileged: true
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        echo 1048576 > /proc/sys/vm/max_map_count 2>/dev/null || true
+        exec /docker-entrypoint.sh
+    ports:
+      - "19009:9009"
+      - "18812:8812"
+      - "19000:9000"
+    volumes:
+      - questdb-0-data:/var/lib/questdb
+      - ./config/questdb/server.conf:/var/lib/questdb/conf/server.conf:ro
+      - ./config/questdb/jvm.options:/var/lib/questdb/conf/jvm.options:ro
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
+      nproc:
+        soft: 131072
+        hard: 131072
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+    restart: unless-stopped
+
+  questdb-1:
+    image: questdb/questdb:latest
+    container_name: questdb-1
+    depends_on:
+      questdb-0:
+        condition: service_started
+    ports:
+      - "19019:9009"
+      - "18822:8812"
+      - "19010:9000"
+    volumes:
+      - questdb-1-data:/var/lib/questdb
+      - ./config/questdb/server.conf:/var/lib/questdb/conf/server.conf:ro
+      - ./config/questdb/jvm.options:/var/lib/questdb/conf/jvm.options:ro
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
+      nproc:
+        soft: 131072
+        hard: 131072
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+    restart: unless-stopped
+
+  quest-router:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        CARGO_PROFILE: docker
+    container_name: quest-router
+    ports:
+      - "9009:9009"
+      - "8812:8812"
+      - "9090:9090"
+      - "8080:8080"
+    depends_on:
+      - questdb-0
+      - questdb-1
+    volumes:
+      - ./config/docker-quest-router.toml:/config/quest-router.toml:ro
+    restart: unless-stopped
+
+  rustfs:
+    image: rustfs/rustfs:latest
+    container_name: rustfs
+    volumes:
+      - rustfs-data:/data
+    ports:
+      - "9000:9000"
+
+volumes:
+  questdb-0-data:
+  questdb-1-data:
+  rustfs-data:

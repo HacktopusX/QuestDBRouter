@@ -43,7 +43,9 @@ impl FederatedExecutor {
         }
 
         let start = Instant::now();
-        let shard_ids = self.pool.shard_ids();
+        let shard_ids = self.state.healthy_pg_shard_ids().map_err(|e| {
+            fed_err(format!("{e}"))
+        })?;
         metrics::record_federated_query(plan_label(plan));
         metrics::record_federated_shards(shard_ids.len());
 
@@ -97,7 +99,10 @@ pub(crate) async fn query_all_shards(
     executor: &FederatedExecutor,
     sql: &str,
 ) -> Result<Vec<(u32, Vec<ClientResponse>)>, pgwire::error::PgWireError> {
-    let shard_ids = executor.pool.shard_ids();
+    let shard_ids = executor
+        .state
+        .healthy_pg_shard_ids()
+        .map_err(|e| e.to_pgwire())?;
     let mut handles = Vec::with_capacity(shard_ids.len());
 
     for shard_id in shard_ids {

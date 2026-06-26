@@ -59,6 +59,29 @@ impl ShardRing {
             .cloned()
     }
 
+    /// Consistent-hash lookup skipping `excluded` shard ids (failover to any other shard).
+    pub fn shard_by_key_filtered(
+        &self,
+        key: &str,
+        excluded: &std::collections::HashSet<u32>,
+    ) -> Option<ShardConfig> {
+        if self.shards.is_empty() {
+            return None;
+        }
+        if excluded.is_empty() {
+            return self.shard_by_key(key);
+        }
+        if let Some(shard) = self.shard_by_key(key) {
+            if !excluded.contains(&shard.id) {
+                return Some(shard);
+            }
+        }
+        self.shards
+            .iter()
+            .find(|s| !excluded.contains(&s.id))
+            .cloned()
+    }
+
     pub fn shard_by_id(&self, id: u32) -> Option<ShardConfig> {
         self.shards.iter().find(|s| s.id == id).cloned()
     }
@@ -174,5 +197,24 @@ mod tests {
     fn ring_wraps_clockwise_past_last_vnode() {
         let ring = ShardRing::from_shards(vec![test_shard(0, 9000)]);
         assert_eq!(ring.shard_by_key("any-key").unwrap().id, 0);
+    }
+
+    #[test]
+    fn filtered_lookup_skips_excluded_primary() {
+        use std::collections::HashSet;
+        let ring = ShardRing::from_shards(vec![test_shard(0, 9000), test_shard(1, 9001)]);
+        let primary = ring.shard_by_key("btc-usdt").unwrap().id;
+        let mut excluded = HashSet::new();
+        excluded.insert(primary);
+        let fallback = ring.shard_by_key_filtered("btc-usdt", &excluded).unwrap();
+        assert_ne!(fallback.id, primary);
+    }
+
+    #[test]
+    fn filtered_lookup_returns_none_when_all_excluded() {
+        use std::collections::HashSet;
+        let ring = ShardRing::from_shards(vec![test_shard(0, 9000), test_shard(1, 9001)]);
+        let excluded: HashSet<u32> = [0, 1].into_iter().collect();
+        assert!(ring.shard_by_key_filtered("any", &excluded).is_none());
     }
 }

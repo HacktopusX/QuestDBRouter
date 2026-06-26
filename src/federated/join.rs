@@ -17,7 +17,7 @@ pub async fn execute_sql_federated(
 ) -> PgWireResult<Vec<Response>> {
     let ctx = SessionContext::new();
     let tables = extract_table_names(sql);
-    let registry = executor.state.table_registry.clone();
+    let registry = executor.state.table_registry();
     let shard_key = executor.state.config.routing.shard_key.clone();
 
     for table in &tables {

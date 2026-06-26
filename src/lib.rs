@@ -2,6 +2,7 @@ pub mod app;
 pub mod config;
 pub mod federated;
 pub mod logging;
+pub mod metadata;
 pub mod metrics;
 pub mod pool;
 pub mod protocol;

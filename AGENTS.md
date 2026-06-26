@@ -1,3 +1,6 @@
+## Required Documentation before making decisions:
+@Apache Data Fusion 
+@QuestDB
 ## Learned User Preferences
 
 - Use codegraph MCP extensively instead of grep for finding and exploring the codebase.
@@ -21,4 +24,7 @@
 - Local/docker testing: `config/docker-quest-router.toml`, `docker compose up -d --build quest-router`, `scripts/test_router.py` (smoke), `scripts/load_test.py --mode scan` (federated).
 - Test scripts create DDL on each shard directly (router DDL hits one shard only); truncate `router_test_trades` or recreate tables to avoid stale-data false failures.
 - Shared test helpers live in `scripts/common.py` — import `SHARD_KEY` (env `ROUTER_SHARD_KEY`), not `ROUTER_SHARD_KEY` as a symbol.
-- Health checks currently log only; unhealthy shards are not yet excluded from routing.
+- Health checks update the metadata actor; unhealthy shards are excluded from ILP/PG routing when `health_check.exclude_unhealthy = true` (default).
+- Phase 1 components: `MetadataProvider` + `MetadataActor`, `QueryRouter` + `DefaultQueryRouter`, `PgWireGateway` (datafusion-postgres), `RoutingError` with PG SQLSTATE mapping, tracing spans on ILP/PG/metadata paths.
+- Phase 1 sign-off checklist: `cargo test` (unit + `tests/phase1_routing.rs` + `tests/pgwire_contract.rs`), `python scripts/test_router.py`, optional `python scripts/test_health_routing.py` (stops one shard), Prometheus `quest_router_shard_healthy` gauges.
+
