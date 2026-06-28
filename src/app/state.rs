@@ -75,15 +75,19 @@ impl AppState {
         info: &crate::routing::SqlRouteInfo,
         params: Option<&[String]>,
     ) -> Result<ShardConfig, RoutingError> {
+        // Never silently fall back to the table name as the shard key — that would
+        // mis-shard the query. Require an explicit literal or bound parameter.
         let key = if let Some(idx) = info.shard_key_param {
-            params
-                .and_then(|p| p.get(idx))
-                .cloned()
-                .unwrap_or_else(|| info.table.clone())
+            params.and_then(|p| p.get(idx)).cloned().ok_or_else(|| {
+                RoutingError::Unsupported(format!(
+                    "missing bind parameter ${} for shard key",
+                    idx + 1
+                ))
+            })?
         } else {
-            info.shard_key
-                .clone()
-                .unwrap_or_else(|| info.table.clone())
+            info.shard_key.clone().ok_or_else(|| {
+                RoutingError::Unsupported("query has no shard-key value to route on".into())
+            })?
         };
         self.route_key(&key, Protocol::Pg)
     }

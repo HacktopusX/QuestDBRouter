@@ -58,7 +58,6 @@ async fn ingest_events(
 
     metrics::record_ingest_events_received(IngestSource::Webhook, refs.len());
 
-    let mut enqueued = 0usize;
     for object_ref in refs {
         if !matches_prefix(&object_ref.key, &state.prefix) {
             continue;
@@ -69,24 +68,17 @@ async fn ingest_events(
             etag: object_ref.etag,
             source: IngestSource::Webhook,
         };
-        match state.handle.enqueue(msg).await {
-            Ok(()) => enqueued += 1,
-            Err(_) => {
-                let depth = state.handle.mailbox_depth();
-                warn!(
-                    bucket = %state.default_bucket,
-                    depth,
-                    "ingest mailbox full, returning 503"
-                );
-                metrics::record_ingest_mailbox_depth(&state.default_bucket, depth);
-                return StatusCode::SERVICE_UNAVAILABLE;
-            }
+        if state.handle.enqueue(msg).await.is_err() {
+            let depth = state.handle.mailbox_depth();
+            warn!(
+                bucket = %state.default_bucket,
+                depth,
+                "ingest mailbox full, returning 503"
+            );
+            metrics::record_ingest_mailbox_depth(&state.default_bucket, depth);
+            return StatusCode::SERVICE_UNAVAILABLE;
         }
     }
 
-    if enqueued == 0 {
-        StatusCode::OK
-    } else {
-        StatusCode::OK
-    }
+    StatusCode::OK
 }

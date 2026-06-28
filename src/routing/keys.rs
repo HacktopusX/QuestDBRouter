@@ -1,4 +1,5 @@
 use memchr::memchr;
+use std::borrow::Cow;
 
 /// Zero-copy measurement name from an ILP line (bytes before the first comma or space).
 pub fn measurement_from_ilp_bytes(body: &[u8]) -> Option<&str> {
@@ -22,9 +23,12 @@ pub fn measurement_from_ilp(body: &[u8]) -> Option<String> {
 }
 
 /// Extract shard key from Influx line protocol (named tag on first line).
-pub fn shard_key_from_ilp(body: &[u8], tag_name: &str) -> String {
+///
+/// Borrows directly from `body` when the tag value is valid UTF-8 (the common
+/// case), avoiding an allocation on the ILP write hot path.
+pub fn shard_key_from_ilp_cow<'a>(body: &'a [u8], tag_name: &str) -> Cow<'a, str> {
     if body.is_empty() {
-        return tag_name.to_string();
+        return Cow::Owned(tag_name.to_string());
     }
     let end = memchr(b'\n', body).unwrap_or(body.len());
     let line = &body[..end];
@@ -38,12 +42,21 @@ pub fn shard_key_from_ilp(body: &[u8], tag_name: &str) -> String {
             if let Some(eq) = memchr(b'=', tag) {
                 let name = &tag[..eq];
                 if tag_name_eq(name, tag_name) {
-                    return String::from_utf8_lossy(&tag[eq + 1..]).into_owned();
+                    let value = &tag[eq + 1..];
+                    return match std::str::from_utf8(value) {
+                        Ok(s) => Cow::Borrowed(s),
+                        Err(_) => Cow::Owned(String::from_utf8_lossy(value).into_owned()),
+                    };
                 }
             }
         }
     }
-    tag_name.to_string()
+    Cow::Owned(tag_name.to_string())
+}
+
+/// Owned-`String` convenience wrapper around [`shard_key_from_ilp_cow`].
+pub fn shard_key_from_ilp(body: &[u8], tag_name: &str) -> String {
+    shard_key_from_ilp_cow(body, tag_name).into_owned()
 }
 
 fn tag_name_eq(name: &[u8], tag_name: &str) -> bool {

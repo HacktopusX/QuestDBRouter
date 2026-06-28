@@ -41,7 +41,7 @@ async fn handle_connection(
             break;
         }
 
-        while let Some(newline) = buf.iter().position(|b| *b == b'\n') {
+        while let Some(newline) = memchr::memchr(b'\n', &buf) {
             let line = buf.split_to(newline + 1);
             forwarder.forward_line(&state, &line, &conn_id).await?;
         }

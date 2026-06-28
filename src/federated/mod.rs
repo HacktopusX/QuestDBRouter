@@ -257,3 +257,58 @@ pub(crate) fn merge_scalar_aggregate(
         futures::stream::iter(vec![Ok(row)]),
     ))])
 }
+
+/// Merge per-shard `(sum, count)` partials into a correct global mean.
+///
+/// AVG cannot be merged by averaging per-shard averages (that is only correct
+/// when every shard holds the same number of rows). The aggregate-scan path
+/// rewrites `avg(x)` into `sum(x), count(x)` before fan-out, and this merges the
+/// partials as `sum(sum_i) / sum(count_i)`.
+pub(crate) fn merge_avg(
+    shard_results: Vec<(u32, Vec<ClientResponse>)>,
+) -> PgWireResult<Vec<Response>> {
+    let mut total_sum = 0f64;
+    let mut total_count = 0f64;
+    let mut saw_rows = false;
+
+    for (_shard_id, responses) in shard_results {
+        for resp in responses {
+            if let ClientResponse::Query((_tag, _fields, rows)) = resp {
+                for row in rows {
+                    let cells = crate::federated::arrow::cells_f64(&row, 2);
+                    if let (Some(sum), Some(count)) = (cells[0], cells[1]) {
+                        total_sum += sum;
+                        total_count += count;
+                        saw_rows = true;
+                    }
+                }
+            }
+        }
+    }
+
+    if !saw_rows || total_count == 0.0 {
+        return Ok(vec![Response::EmptyQuery]);
+    }
+
+    let mean = total_sum / total_count;
+    let fields = Arc::new(vec![FieldInfo::new(
+        "avg".into(),
+        None,
+        None,
+        postgres_types::Type::FLOAT8,
+        pgwire::api::results::FieldFormat::Text,
+    )]);
+    let mut encoder = DataRowEncoder::new(fields.clone());
+    let text = mean.to_string();
+    encoder.encode_field(&text).map_err(|e| {
+        let fe = FederatedError::ShardQuery { shard_id: 0, message: e.to_string() };
+        tracing::warn!(err = %fe, "federated avg merge failed");
+        fe.to_pgwire()
+    })?;
+    let row = encoder.take_row();
+
+    Ok(vec![Response::Query(QueryResponse::new(
+        fields,
+        futures::stream::iter(vec![Ok(row)]),
+    ))])
+}

@@ -1,11 +1,12 @@
 use crate::app::backend_pg_config;
 use crate::config::{PgAuthConfig, ShardConfig};
 use crate::pool::PoolError;
+use parking_lot::Mutex;
 use pgwire::api::client::auth::DefaultStartupHandler;
 use pgwire::tokio::client::PgWireClient;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::Semaphore;
 
 /// Shared PG client pool keyed by shard id.
 #[derive(Clone)]
@@ -59,19 +60,14 @@ impl ShardPgPool {
                 source: Box::new(e),
             }
         })?;
-        let client = {
-            let mut guard = self.inner.clients.lock().await;
-            if let Some(vec) = guard.get_mut(&shard_id) {
-                if let Some(client) = vec.pop() {
-                    client
-                } else {
-                    drop(guard);
-                    self.connect(shard_id).await?
-                }
-            } else {
-                drop(guard);
-                self.connect(shard_id).await?
-            }
+        // Synchronous, await-free pop from the idle list; never held across `.await`.
+        let pooled = {
+            let mut guard = self.inner.clients.lock();
+            guard.get_mut(&shard_id).and_then(|vec| vec.pop())
+        };
+        let client = match pooled {
+            Some(client) => client,
+            None => self.connect(shard_id).await?,
         };
         Ok(PooledClient {
             pool: self.clone(),
@@ -108,8 +104,8 @@ impl ShardPgPool {
             })
     }
 
-    async fn release(&self, shard_id: u32, client: PgWireClient) {
-        let mut guard = self.inner.clients.lock().await;
+    fn release(&self, shard_id: u32, client: PgWireClient) {
+        let mut guard = self.inner.clients.lock();
         let vec = guard.entry(shard_id).or_default();
         if vec.len() < self.inner.max_per_shard {
             vec.push(client);
@@ -148,12 +144,11 @@ impl Drop for PooledClient {
         if !self.return_to_pool {
             return;
         }
+        // Release synchronously so the connection is back in the pool before the
+        // capacity permit (`_permit`, dropped after this) is released — no spawn,
+        // no window where a waiter sees a free permit but an empty pool.
         if let Some(client) = self.client.take() {
-            let pool = self.pool.clone();
-            let shard_id = self.shard_id;
-            tokio::spawn(async move {
-                pool.release(shard_id, client).await;
-            });
+            self.pool.release(self.shard_id, client);
         }
     }
 }

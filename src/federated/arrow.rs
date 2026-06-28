@@ -103,3 +103,29 @@ pub fn first_cell_string(row: &DataRow) -> Option<String> {
 pub fn first_cell_f64(row: &DataRow) -> Option<f64> {
     first_cell_string(row)?.parse().ok()
 }
+
+/// Decode the first `n` cells of a row as `f64`, returning `None` per cell that
+/// is NULL, non-numeric, or truncated. Used by the federated AVG merge to read
+/// per-shard `(sum, count)` partials.
+pub fn cells_f64(row: &DataRow, n: usize) -> Vec<Option<f64>> {
+    use bytes::Buf;
+    let mut buf = row.data.as_ref();
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        let value = if buf.remaining() < 4 {
+            None
+        } else {
+            let len = buf.get_i32();
+            if len < 0 || buf.remaining() < len as usize {
+                None
+            } else {
+                let bytes = buf.copy_to_bytes(len as usize);
+                std::str::from_utf8(&bytes)
+                    .ok()
+                    .and_then(|s| s.trim().parse::<f64>().ok())
+            }
+        };
+        out.push(value);
+    }
+    out
+}

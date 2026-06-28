@@ -10,6 +10,8 @@ use log::{info, warn};
 use crate::protocol::{pg_gateway::DatafusionPgGateway, PgWireGateway};
 #[cfg(not(feature = "federated"))]
 use crate::protocol::pg;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpStream;
@@ -28,13 +30,16 @@ pub async fn run(config_path: &str) -> anyhow::Result<()> {
 
     metrics::init(config.metrics.enabled, config.metrics.address)?;
 
-    let (metadata, _actor_task) = MetadataActor::spawn(config.clone());
+    let (metadata, actor_task) = MetadataActor::spawn(config.clone());
+    tokio::spawn(async move {
+        if let Err(e) = actor_task.await {
+            warn!("metadata actor task ended unexpectedly: {e}");
+        }
+    });
     let state = AppState::new(config.clone(), metadata.clone())?;
     let ilp_listen = state.config.listen.ilp;
     let pg_listen = state.config.listen.pg;
     let stream_enabled = state.config.stream.enabled;
-    let stream_listen = state.config.listen.stream;
-    let stream_hub = state.stream.clone();
 
     let health_config = Arc::new(state.config.health_check.clone());
     let health_shards = state.config.shards.clone();
@@ -89,90 +94,41 @@ pub async fn run(config_path: &str) -> anyhow::Result<()> {
         None
     };
 
-    if stream_enabled {
-        let hub = stream_hub
-            .ok_or_else(|| anyhow::anyhow!("stream enabled but hub not initialized"))?;
-        let listen = stream_listen
-            .ok_or_else(|| anyhow::anyhow!("stream enabled but listen.stream not set"))?;
-        let ilp_state = state.clone();
+    // Collect every long-running listener into one homogeneous future set so the
+    // wiring isn't duplicated across the stream/ingest/federated cfg combinations.
+    type ServerTask = Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>>;
+    let mut tasks: Vec<ServerTask> = Vec::new();
 
-        if let Some((http_state, ingest_addr)) = ingest_http_state {
-            #[cfg(feature = "federated")]
-            {
-                let pg_gateway = DatafusionPgGateway::new(state.clone());
-                tokio::try_join!(
-                    ilp::serve(ilp_state, ilp_listen),
-                    pg_gateway.serve(pg_listen),
-                    stream::serve(hub, listen),
-                    ingest::http::serve(http_state, ingest_addr),
-                )?;
-            }
-            #[cfg(not(feature = "federated"))]
-            {
-                tokio::try_join!(
-                    ilp::serve(ilp_state, ilp_listen),
-                    pg::serve(state.clone(), pg_listen),
-                    stream::serve(hub, listen),
-                    ingest::http::serve(http_state, ingest_addr),
-                )?;
-            }
-        } else {
-            #[cfg(feature = "federated")]
-            {
-                let pg_gateway = DatafusionPgGateway::new(state.clone());
-                tokio::try_join!(
-                    ilp::serve(ilp_state, ilp_listen),
-                    pg_gateway.serve(pg_listen),
-                    stream::serve(hub, listen),
-                )?;
-            }
-            #[cfg(not(feature = "federated"))]
-            {
-                tokio::try_join!(
-                    ilp::serve(ilp_state, ilp_listen),
-                    pg::serve(state.clone(), pg_listen),
-                    stream::serve(hub, listen),
-                )?;
-            }
-        }
-    } else if let Some((http_state, ingest_addr)) = ingest_http_state {
-        let ilp_state = state.clone();
-        #[cfg(feature = "federated")]
-        {
-            let pg_gateway = DatafusionPgGateway::new(state.clone());
-            tokio::try_join!(
-                ilp::serve(ilp_state, ilp_listen),
-                pg_gateway.serve(pg_listen),
-                ingest::http::serve(http_state, ingest_addr),
-            )?;
-        }
-        #[cfg(not(feature = "federated"))]
-        {
-            tokio::try_join!(
-                ilp::serve(ilp_state, ilp_listen),
-                pg::serve(state.clone(), pg_listen),
-                ingest::http::serve(http_state, ingest_addr),
-            )?;
-        }
-    } else {
-        let ilp_state = state.clone();
-        #[cfg(feature = "federated")]
-        {
-            let pg_gateway = DatafusionPgGateway::new(state.clone());
-            tokio::try_join!(
-                ilp::serve(ilp_state, ilp_listen),
-                pg_gateway.serve(pg_listen),
-            )?;
-        }
-        #[cfg(not(feature = "federated"))]
-        {
-            tokio::try_join!(
-                ilp::serve(ilp_state, ilp_listen),
-                pg::serve(state.clone(), pg_listen),
-            )?;
-        }
+    tasks.push(Box::pin(ilp::serve(state.clone(), ilp_listen)));
+
+    #[cfg(feature = "federated")]
+    {
+        let pg_gateway = DatafusionPgGateway::new(state.clone());
+        tasks.push(Box::pin(async move { pg_gateway.serve(pg_listen).await }));
+    }
+    #[cfg(not(feature = "federated"))]
+    {
+        tasks.push(Box::pin(pg::serve(state.clone(), pg_listen)));
     }
 
+    if stream_enabled {
+        let hub = state
+            .stream
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("stream enabled but hub not initialized"))?;
+        let listen = state
+            .config
+            .listen
+            .stream
+            .ok_or_else(|| anyhow::anyhow!("stream enabled but listen.stream not set"))?;
+        tasks.push(Box::pin(stream::serve(hub, listen)));
+    }
+
+    if let Some((http_state, ingest_addr)) = ingest_http_state {
+        tasks.push(Box::pin(ingest::http::serve(http_state, ingest_addr)));
+    }
+
+    futures::future::try_join_all(tasks).await?;
     Ok(())
 }
 

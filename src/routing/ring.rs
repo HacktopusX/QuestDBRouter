@@ -1,7 +1,5 @@
 use crate::config::ShardConfig;
-use ahash::AHasher;
 use hashring::HashRing;
-use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -59,7 +57,15 @@ impl ShardRing {
             .cloned()
     }
 
-    /// Consistent-hash lookup skipping `excluded` shard ids (failover to any other shard).
+    /// Consistent-hash lookup skipping `excluded` shard ids.
+    ///
+    /// When the primary shard is excluded, this walks the ring deterministically
+    /// using salted probes to land on the next healthy shard, then falls back to
+    /// the lowest non-excluded shard id. The result is reproducible across process
+    /// restarts (stable hashing) so a key's failover target is deterministic.
+    ///
+    /// NOTE: rows written to a failover shard while the primary is down are not
+    /// migrated back when it recovers — that requires resharding (future phase).
     pub fn shard_by_key_filtered(
         &self,
         key: &str,
@@ -76,20 +82,28 @@ impl ShardRing {
                 return Some(shard);
             }
         }
+        // Deterministic ring walk: salt the key and probe successive ring positions
+        // until a non-excluded shard is found.
+        let max_probes = self.vnode_count().max(1);
+        for attempt in 1..=max_probes {
+            if let Some(vnode) = self.ring.get(&(key, attempt)) {
+                if !excluded.contains(&vnode.shard_id) {
+                    if let Some(shard) = self.shards.iter().find(|s| s.id == vnode.shard_id) {
+                        return Some(shard.clone());
+                    }
+                }
+            }
+        }
+        // Last resort: lowest non-excluded shard id (order-independent, deterministic).
         self.shards
             .iter()
-            .find(|s| !excluded.contains(&s.id))
+            .filter(|s| !excluded.contains(&s.id))
+            .min_by_key(|s| s.id)
             .cloned()
     }
 
     pub fn shard_by_id(&self, id: u32) -> Option<ShardConfig> {
         self.shards.iter().find(|s| s.id == id).cloned()
-    }
-
-    pub fn hash_key(key: &str) -> u64 {
-        let mut hasher = AHasher::default();
-        key.hash(&mut hasher);
-        hasher.finish()
     }
 }
 
@@ -208,6 +222,25 @@ mod tests {
         excluded.insert(primary);
         let fallback = ring.shard_by_key_filtered("btc-usdt", &excluded).unwrap();
         assert_ne!(fallback.id, primary);
+    }
+
+    #[test]
+    fn filtered_lookup_is_deterministic_across_calls() {
+        use std::collections::HashSet;
+        let ring = ShardRing::from_shards(vec![
+            test_shard(0, 9000),
+            test_shard(1, 9001),
+            test_shard(2, 9002),
+        ]);
+        let primary = ring.shard_by_key("btc-usdt").unwrap().id;
+        let mut excluded = HashSet::new();
+        excluded.insert(primary);
+        let first = ring.shard_by_key_filtered("btc-usdt", &excluded).unwrap().id;
+        for _ in 0..50 {
+            let again = ring.shard_by_key_filtered("btc-usdt", &excluded).unwrap().id;
+            assert_eq!(again, first, "failover target must be deterministic");
+            assert_ne!(again, primary);
+        }
     }
 
     #[test]

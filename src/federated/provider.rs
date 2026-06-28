@@ -41,7 +41,7 @@ impl QuestDbShardTableProvider {
         }
     }
 
-    fn scan_sql(&self) -> String {
+    fn scan_sql(&self, limit: Option<usize>) -> String {
         let cols = self
             .schema
             .fields()
@@ -49,7 +49,13 @@ impl QuestDbShardTableProvider {
             .map(|f| format!("\"{}\"", f.name().replace('"', "\"\"")))
             .collect::<Vec<_>>()
             .join(", ");
-        format!("SELECT {cols} FROM {}", self.table_name)
+        let mut sql = format!("SELECT {cols} FROM {}", self.table_name);
+        // Per-shard LIMIT is an upper bound only; DataFusion still applies the
+        // global limit above this scan. It just trims how much each shard returns.
+        if let Some(n) = limit {
+            sql.push_str(&format!(" LIMIT {n}"));
+        }
+        sql
     }
 
     async fn fetch_all_batches(&self, sql: &str) -> DfResult<Vec<arrow::record_batch::RecordBatch>> {
@@ -111,9 +117,9 @@ impl TableProvider for QuestDbShardTableProvider {
         _state: &dyn Session,
         projection: Option<&Vec<usize>>,
         _filters: &[datafusion::logical_expr::Expr],
-        _limit: Option<usize>,
+        limit: Option<usize>,
     ) -> DfResult<Arc<dyn ExecutionPlan>> {
-        let sql = self.scan_sql();
+        let sql = self.scan_sql(limit);
         let batches = self.fetch_all_batches(&sql).await?;
         Ok(MemorySourceConfig::try_new_exec(
             &[batches],
