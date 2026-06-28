@@ -73,13 +73,12 @@ async fn connect_backend<'a>(
     use std::collections::hash_map::Entry;
 
     if let Entry::Vacant(entry) = conn.backends.entry(shard_id) {
-        let shard = state
-            .metadata
-            .snapshot()
+        let snapshot = state.metadata.snapshot();
+        let shard = snapshot
             .shard_by_id(shard_id, crate::metadata::Protocol::Pg)
             .map_err(routing_err)?;
         let config = state
-            .backend_pg_config(&shard)
+            .backend_pg_config(shard)
             .map_err(|e| wire_err(e.to_string()))?;
         let startup = DefaultStartupHandler::new();
         let client = PgWireClient::connect(Arc::new(config), startup, None)

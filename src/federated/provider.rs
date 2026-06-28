@@ -9,9 +9,10 @@ use datafusion::datasource::TableProvider;
 use datafusion::error::{DataFusionError, Result as DfResult};
 use datafusion::logical_expr::TableType;
 use datafusion::physical_plan::ExecutionPlan;
+use pgwire::messages::data::DataRow;
 
 use crate::federated::arrow::{extract_query_rows, query_shard};
-use crate::federated::pg_types::{decode_row_cells, rows_to_typed_batch_for_schema};
+use crate::federated::pg_types::{build_pg_field_index, pg_rows_to_typed_batch_for_schema};
 use crate::federated::FederatedExecutor;
 use crate::routing::TableRegistry;
 
@@ -60,21 +61,18 @@ impl QuestDbShardTableProvider {
 
     async fn fetch_all_batches(&self, sql: &str) -> DfResult<Vec<arrow::record_batch::RecordBatch>> {
         let shard_ids = self.executor.pool.shard_ids();
-        let mut all_rows: Vec<Vec<Option<String>>> = Vec::new();
+        let mut all_rows: Vec<DataRow> = Vec::new();
         let mut pg_fields = None;
 
         for shard_id in shard_ids {
             let responses = query_shard(&self.executor.pool, shard_id, sql)
                 .await
                 .map_err(|e| DataFusionError::External(Box::new(std::io::Error::other(e.to_string()))))?;
-            if let Some((fields, rows)) = extract_query_rows(&responses) {
+            if let Some((fields, rows)) = extract_query_rows(responses) {
                 if pg_fields.is_none() {
                     pg_fields = Some(fields);
                 }
-                let col_count = pg_fields.as_ref().map(|f| f.len()).unwrap_or(0);
-                for row in rows {
-                    all_rows.push(decode_row_cells(&row, col_count));
-                }
+                all_rows.extend(rows);
             }
         }
 
@@ -82,9 +80,11 @@ impl QuestDbShardTableProvider {
             return Ok(vec![]);
         };
 
-        Ok(vec![rows_to_typed_batch_for_schema(
+        let pg_index = build_pg_field_index(&fields);
+        Ok(vec![pg_rows_to_typed_batch_for_schema(
             self.schema.as_ref(),
             &fields,
+            &pg_index,
             &all_rows,
         )?])
     }

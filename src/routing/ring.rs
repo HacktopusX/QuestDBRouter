@@ -37,6 +37,10 @@ impl ShardRing {
         self.shards.len()
     }
 
+    pub fn shards(&self) -> &[ShardConfig] {
+        &self.shards
+    }
+
     pub fn vnode_count(&self) -> usize {
         self.shards
             .iter()
@@ -44,20 +48,17 @@ impl ShardRing {
             .sum()
     }
 
-    pub fn shard_by_key(&self, key: &str) -> Option<ShardConfig> {
+    pub fn shard_by_key(&self, key: &str) -> Option<&ShardConfig> {
         if self.shards.is_empty() {
             return None;
         }
         #[derive(Hash)]
         struct Key<'a>(&'a str);
         let vnode = self.ring.get(&Key(key))?;
-        self.shards
-            .iter()
-            .find(|s| s.id == vnode.shard_id)
-            .cloned()
+        self.shard_by_id(vnode.shard_id)
     }
 
-    /// Consistent-hash lookup skipping `excluded` shard ids.
+    /// Consistent-hash lookup skipping shards for which `is_excluded(id)` is true.
     ///
     /// When the primary shard is excluded, this walks the ring deterministically
     /// using salted probes to land on the next healthy shard, then falls back to
@@ -66,44 +67,36 @@ impl ShardRing {
     ///
     /// NOTE: rows written to a failover shard while the primary is down are not
     /// migrated back when it recovers — that requires resharding (future phase).
-    pub fn shard_by_key_filtered(
-        &self,
-        key: &str,
-        excluded: &std::collections::HashSet<u32>,
-    ) -> Option<ShardConfig> {
+    pub fn shard_by_key_filtered<F>(&self, key: &str, is_excluded: F) -> Option<&ShardConfig>
+    where
+        F: Fn(u32) -> bool,
+    {
         if self.shards.is_empty() {
             return None;
         }
-        if excluded.is_empty() {
-            return self.shard_by_key(key);
-        }
         if let Some(shard) = self.shard_by_key(key) {
-            if !excluded.contains(&shard.id) {
+            if !is_excluded(shard.id) {
                 return Some(shard);
             }
         }
-        // Deterministic ring walk: salt the key and probe successive ring positions
-        // until a non-excluded shard is found.
         let max_probes = self.vnode_count().max(1);
         for attempt in 1..=max_probes {
             if let Some(vnode) = self.ring.get(&(key, attempt)) {
-                if !excluded.contains(&vnode.shard_id) {
-                    if let Some(shard) = self.shards.iter().find(|s| s.id == vnode.shard_id) {
-                        return Some(shard.clone());
+                if !is_excluded(vnode.shard_id) {
+                    if let Some(shard) = self.shard_by_id(vnode.shard_id) {
+                        return Some(shard);
                     }
                 }
             }
         }
-        // Last resort: lowest non-excluded shard id (order-independent, deterministic).
         self.shards
             .iter()
-            .filter(|s| !excluded.contains(&s.id))
+            .filter(|s| !is_excluded(s.id))
             .min_by_key(|s| s.id)
-            .cloned()
     }
 
-    pub fn shard_by_id(&self, id: u32) -> Option<ShardConfig> {
-        self.shards.iter().find(|s| s.id == id).cloned()
+    pub fn shard_by_id(&self, id: u32) -> Option<&ShardConfig> {
+        self.shards.iter().find(|s| s.id == id)
     }
 }
 
@@ -196,7 +189,6 @@ mod tests {
             let id = ring.shard_by_key(&format!("key-{i}")).unwrap().id as usize;
             counts[id] += 1;
         }
-        // 3:1 weight ratio → expect ~75% / ~25% with tolerance.
         assert!(counts[0] > counts[1], "heavier shard should receive more keys");
         let ratio = counts[0] as f64 / counts[1] as f64;
         assert!(
@@ -215,29 +207,31 @@ mod tests {
 
     #[test]
     fn filtered_lookup_skips_excluded_primary() {
-        use std::collections::HashSet;
         let ring = ShardRing::from_shards(vec![test_shard(0, 9000), test_shard(1, 9001)]);
         let primary = ring.shard_by_key("btc-usdt").unwrap().id;
-        let mut excluded = HashSet::new();
-        excluded.insert(primary);
-        let fallback = ring.shard_by_key_filtered("btc-usdt", &excluded).unwrap();
+        let fallback = ring
+            .shard_by_key_filtered("btc-usdt", |id| id == primary)
+            .unwrap();
         assert_ne!(fallback.id, primary);
     }
 
     #[test]
     fn filtered_lookup_is_deterministic_across_calls() {
-        use std::collections::HashSet;
         let ring = ShardRing::from_shards(vec![
             test_shard(0, 9000),
             test_shard(1, 9001),
             test_shard(2, 9002),
         ]);
         let primary = ring.shard_by_key("btc-usdt").unwrap().id;
-        let mut excluded = HashSet::new();
-        excluded.insert(primary);
-        let first = ring.shard_by_key_filtered("btc-usdt", &excluded).unwrap().id;
+        let first = ring
+            .shard_by_key_filtered("btc-usdt", |id| id == primary)
+            .unwrap()
+            .id;
         for _ in 0..50 {
-            let again = ring.shard_by_key_filtered("btc-usdt", &excluded).unwrap().id;
+            let again = ring
+                .shard_by_key_filtered("btc-usdt", |id| id == primary)
+                .unwrap()
+                .id;
             assert_eq!(again, first, "failover target must be deterministic");
             assert_ne!(again, primary);
         }
@@ -245,9 +239,7 @@ mod tests {
 
     #[test]
     fn filtered_lookup_returns_none_when_all_excluded() {
-        use std::collections::HashSet;
         let ring = ShardRing::from_shards(vec![test_shard(0, 9000), test_shard(1, 9001)]);
-        let excluded: HashSet<u32> = [0, 1].into_iter().collect();
-        assert!(ring.shard_by_key_filtered("any", &excluded).is_none());
+        assert!(ring.shard_by_key_filtered("any", |_| true).is_none());
     }
 }

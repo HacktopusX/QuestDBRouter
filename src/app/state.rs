@@ -118,11 +118,7 @@ impl AppState {
     pub fn healthy_pg_shard_ids(&self) -> Result<Vec<u32>, RoutingError> {
         let snap = self.metadata.snapshot();
         snap.ensure_min_healthy(Protocol::Pg)?;
-        Ok(snap
-            .healthy_shards(Protocol::Pg)
-            .into_iter()
-            .map(|s| s.id)
-            .collect())
+        Ok(snap.healthy_shard_ids(Protocol::Pg))
     }
 }
 

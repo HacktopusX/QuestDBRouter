@@ -86,6 +86,34 @@ pub fn field_infos_to_arrow_schema(fields: &[FieldInfo]) -> Arc<Schema> {
     Arc::new(Schema::new(arrow_fields))
 }
 
+pub fn build_pg_field_index(pg_fields: &[FieldInfo]) -> std::collections::HashMap<String, usize> {
+    pg_fields
+        .iter()
+        .enumerate()
+        .map(|(idx, field)| (field.name().to_ascii_lowercase(), idx))
+        .collect()
+}
+
+/// Decode all cells in a wire `DataRow` as UTF-8 string slices borrowing from `row`.
+fn decode_row_cell_refs(row: &DataRow) -> Vec<Option<&str>> {
+    use bytes::Buf;
+    let mut buf = row.data.as_ref();
+    let mut cells = Vec::new();
+    while buf.remaining() >= 4 {
+        let len = buf.get_i32();
+        if len < 0 {
+            cells.push(None);
+        } else if buf.remaining() < len as usize {
+            break;
+        } else {
+            let bytes = &buf[..len as usize];
+            buf.advance(len as usize);
+            cells.push(std::str::from_utf8(bytes).ok());
+        }
+    }
+    cells
+}
+
 pub fn decode_row_cells(row: &DataRow, col_count: usize) -> Vec<Option<String>> {
     use bytes::Buf;
     let mut buf = row.data.as_ref();
@@ -156,6 +184,47 @@ pub fn rows_to_typed_batch_for_schema(
                 .as_ref()
                 .unwrap_or(data_type),
             &values,
+        )?);
+    }
+
+    RecordBatch::try_new(Arc::new(target_schema.clone()), arrays)
+        .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))
+}
+
+/// Build a batch from wire `DataRow`s, decoding cells in one pass per row without
+/// allocating intermediate `String` values per cell.
+pub fn pg_rows_to_typed_batch_for_schema(
+    target_schema: &Schema,
+    pg_fields: &[FieldInfo],
+    pg_index: &std::collections::HashMap<String, usize>,
+    rows: &[DataRow],
+) -> DfResult<RecordBatch> {
+    use arrow::record_batch::RecordBatch;
+
+    let mut columns: Vec<Vec<Option<&str>>> = (0..target_schema.fields().len())
+        .map(|_| Vec::with_capacity(rows.len()))
+        .collect();
+
+    for row in rows {
+        let cells = decode_row_cell_refs(row);
+        for (col_idx, target_field) in target_schema.fields().iter().enumerate() {
+            let pg_idx = pg_index.get(&target_field.name().to_ascii_lowercase());
+            let value = pg_idx.and_then(|&idx| cells.get(idx).copied()).flatten();
+            columns[col_idx].push(value);
+        }
+    }
+
+    let mut arrays: Vec<ArrayRef> = Vec::with_capacity(target_schema.fields().len());
+    for (col_idx, target_field) in target_schema.fields().iter().enumerate() {
+        let pg_idx = pg_index.get(&target_field.name().to_ascii_lowercase());
+        let pg_field = pg_idx.and_then(|&idx| pg_fields.get(idx));
+        let data_type = target_field.data_type();
+        arrays.push(build_array(
+            pg_field
+                .map(|f| pg_type_to_arrow(f.datatype()))
+                .as_ref()
+                .unwrap_or(data_type),
+            &columns[col_idx],
         )?);
     }
 

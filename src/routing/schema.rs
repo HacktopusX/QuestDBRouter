@@ -1,4 +1,5 @@
 use crate::config::TableRoutingConfig;
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 /// Registry of table routing metadata from config.
@@ -25,9 +26,11 @@ impl TableRegistry {
         self.get(name).map(|t| t.sharded).unwrap_or(true)
     }
 
-    pub fn shard_key_for(&self, name: &str, default: &str) -> String {
+    /// Shard-key column for `name`, borrowing from config when possible.
+    pub fn shard_key_for<'a>(&'a self, name: &str, default: &'a str) -> Cow<'a, str> {
         self.get(name)
-            .and_then(|t| t.shard_key.clone())
-            .unwrap_or_else(|| default.to_string())
+            .and_then(|t| t.shard_key.as_deref())
+            .map(Cow::Borrowed)
+            .unwrap_or(Cow::Borrowed(default))
     }
 }

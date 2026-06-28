@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::config::ShardConfig;
 use crate::routing::{RoutingError, ShardRing, TableRegistry};
@@ -36,7 +36,6 @@ pub struct ClusterSnapshot {
     pub ring: ShardRing,
     pub table_registry: TableRegistry,
     pub health: HashMap<u32, ShardHealth>,
-    pub all_shards: Vec<ShardConfig>,
     pub exclude_unhealthy: bool,
     pub min_healthy_shards: usize,
 }
@@ -53,10 +52,9 @@ impl ClusterSnapshot {
             .map(|s| (s.id, ShardHealth::healthy_all()))
             .collect();
         Self {
-            ring: ShardRing::from_shards(shards.clone()),
+            ring: ShardRing::from_shards(shards),
             table_registry,
             health,
-            all_shards: shards,
             exclude_unhealthy,
             min_healthy_shards,
         }
@@ -66,22 +64,20 @@ impl ClusterSnapshot {
         &self.table_registry
     }
 
-    pub fn excluded_for(&self, protocol: Protocol) -> HashSet<u32> {
-        if !self.exclude_unhealthy {
-            return HashSet::new();
-        }
-        self.health
-            .iter()
-            .filter(|(_, h)| !h.is_ok_for(protocol))
-            .map(|(id, _)| *id)
-            .collect()
+    fn is_excluded(&self, shard_id: u32, protocol: Protocol) -> bool {
+        self.exclude_unhealthy
+            && self
+                .health
+                .get(&shard_id)
+                .is_some_and(|h| !h.is_ok_for(protocol))
     }
 
     pub fn healthy_count(&self, protocol: Protocol) -> usize {
         if !self.exclude_unhealthy {
-            return self.all_shards.len();
+            return self.ring.shard_count();
         }
-        self.all_shards
+        self.ring
+            .shards()
             .iter()
             .filter(|s| {
                 self.health
@@ -105,17 +101,16 @@ impl ClusterSnapshot {
         Ok(())
     }
 
-    pub fn shard_for_key(&self, key: &str, protocol: Protocol) -> Result<ShardConfig, RoutingError> {
+    pub fn shard_for_key(&self, key: &str, protocol: Protocol) -> Result<&ShardConfig, RoutingError> {
         self.ensure_min_healthy(protocol)?;
-        let excluded = self.excluded_for(protocol);
         self.ring
-            .shard_by_key_filtered(key, &excluded)
+            .shard_by_key_filtered(key, |id| self.is_excluded(id, protocol))
             .ok_or_else(|| RoutingError::ShardNotFound {
                 key: key.to_string(),
             })
     }
 
-    pub fn shard_by_id(&self, id: u32, protocol: Protocol) -> Result<ShardConfig, RoutingError> {
+    pub fn shard_by_id(&self, id: u32, protocol: Protocol) -> Result<&ShardConfig, RoutingError> {
         self.ensure_min_healthy(protocol)?;
         let shard = self
             .ring
@@ -123,35 +118,35 @@ impl ClusterSnapshot {
             .ok_or(RoutingError::ShardNotFound {
                 key: id.to_string(),
             })?;
-        if self.exclude_unhealthy {
-            let health = self.health.get(&id).copied().unwrap_or(ShardHealth::healthy_all());
-            if !health.is_ok_for(protocol) {
-                return Err(RoutingError::ShardUnhealthy { shard_id: id });
-            }
+        if self.is_excluded(id, protocol) {
+            return Err(RoutingError::ShardUnhealthy { shard_id: id });
         }
         Ok(shard)
     }
 
-    pub fn healthy_shards(&self, protocol: Protocol) -> Vec<ShardConfig> {
+    /// Healthy shard ids for fan-out queries (no `ShardConfig` cloning).
+    pub fn healthy_shard_ids(&self, protocol: Protocol) -> Vec<u32> {
         if !self.exclude_unhealthy {
-            return self.all_shards.clone();
+            return self.ring.shards().iter().map(|s| s.id).collect();
         }
-        self.all_shards
+        self.ring
+            .shards()
             .iter()
             .filter(|s| {
                 self.health
                     .get(&s.id)
                     .is_some_and(|h| h.is_ok_for(protocol))
             })
-            .cloned()
+            .map(|s| s.id)
             .collect()
     }
 
-    pub fn default_healthy_shard(&self, protocol: Protocol) -> Result<ShardConfig, RoutingError> {
+    pub fn default_healthy_shard(&self, protocol: Protocol) -> Result<&ShardConfig, RoutingError> {
         self.ensure_min_healthy(protocol)?;
-        self.healthy_shards(protocol)
-            .into_iter()
-            .next()
+        self.ring
+            .shards()
+            .iter()
+            .find(|s| !self.is_excluded(s.id, protocol))
             .ok_or(RoutingError::InsufficientHealthyShards {
                 required: self.min_healthy_shards.max(1),
                 available: 0,
@@ -202,5 +197,18 @@ mod tests {
             err,
             RoutingError::InsufficientHealthyShards { .. }
         ));
+    }
+
+    #[test]
+    fn healthy_shard_ids_excludes_bad_nodes() {
+        let mut snap = ClusterSnapshot::new(
+            vec![test_shard(0), test_shard(1)],
+            TableRegistry::default(),
+            true,
+            1,
+        );
+        snap.health.insert(1, ShardHealth { ilp_ok: true, pg_ok: false });
+        let ids = snap.healthy_shard_ids(Protocol::Pg);
+        assert_eq!(ids, vec![0]);
     }
 }

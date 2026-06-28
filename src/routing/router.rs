@@ -71,7 +71,10 @@ impl QueryRouter for DefaultQueryRouter {
     }
 
     fn route_key(&self, key: &str, protocol: Protocol) -> Result<ShardConfig, RoutingError> {
-        self.metadata.snapshot().shard_for_key(key, protocol)
+        self.metadata
+            .snapshot()
+            .shard_for_key(key, protocol)
+            .cloned()
     }
 
     fn plan_sql(&self, sql: &str) -> Result<RoutePlan, RoutingError> {

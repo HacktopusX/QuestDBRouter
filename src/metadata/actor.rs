@@ -118,21 +118,35 @@ impl MetadataActor {
         metrics::record_shard_health(shard_id, "ilp", ilp_ok);
         metrics::record_shard_health(shard_id, "pg", pg_ok);
 
-        let current = snapshot_tx.borrow().clone();
-        let prev = current
-            .health
-            .get(&shard_id)
-            .copied()
-            .unwrap_or(ShardHealth::healthy_all());
-        if prev.ilp_ok == ilp_ok && prev.pg_ok == pg_ok {
-            return;
-        }
+        let (ring, table_registry, mut health, exclude_unhealthy, min_healthy_shards) = {
+            let current = snapshot_tx.borrow();
+            let prev = current
+                .health
+                .get(&shard_id)
+                .copied()
+                .unwrap_or(ShardHealth::healthy_all());
+            if prev.ilp_ok == ilp_ok && prev.pg_ok == pg_ok {
+                return;
+            }
+            (
+                current.ring.clone(),
+                current.table_registry.clone(),
+                current.health.clone(),
+                current.exclude_unhealthy,
+                current.min_healthy_shards,
+            )
+        };
 
-        let mut next = (*current).clone();
-        next.health
-            .insert(shard_id, ShardHealth { ilp_ok, pg_ok });
+        health.insert(shard_id, ShardHealth { ilp_ok, pg_ok });
+        let next = Arc::new(ClusterSnapshot {
+            ring,
+            table_registry,
+            health,
+            exclude_unhealthy,
+            min_healthy_shards,
+        });
         debug!("metadata snapshot updated shard_id={shard_id}");
-        let _ = snapshot_tx.send(Arc::new(next));
+        let _ = snapshot_tx.send(next);
     }
 }
 

@@ -63,17 +63,14 @@ fn healthy_pg_shards_list_excludes_bad_nodes() {
     );
     snap.health.insert(1, ShardHealth { ilp_ok: true, pg_ok: false });
 
-    let healthy = snap.healthy_shards(Protocol::Pg);
-    assert_eq!(healthy.len(), 1);
-    assert_eq!(healthy[0].id, 0);
+    let healthy = snap.healthy_shard_ids(Protocol::Pg);
+    assert_eq!(healthy, vec![0]);
 }
 
 #[test]
 fn ring_filtered_lookup_is_deterministic() {
     let ring = ShardRing::from_shards(vec![test_shard(0), test_shard(1)]);
-    let mut excluded = std::collections::HashSet::new();
-    excluded.insert(0);
-    let shard = ring.shard_by_key_filtered("ETH-USD", &excluded).unwrap();
+    let shard = ring.shard_by_key_filtered("ETH-USD", |id| id == 0).unwrap();
     assert_eq!(shard.id, 1);
 }
 

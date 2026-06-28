@@ -73,11 +73,11 @@ pub async fn query_shard_client(
 }
 
 pub fn extract_query_rows(
-    responses: &[ClientResponse],
+    responses: Vec<ClientResponse>,
 ) -> Option<(Vec<FieldInfo>, Vec<DataRow>)> {
     for resp in responses {
         if let ClientResponse::Query((_tag, fields, rows)) = resp {
-            return Some((fields.clone(), rows.clone()));
+            return Some((fields, rows));
         }
     }
     None

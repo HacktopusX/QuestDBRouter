@@ -72,12 +72,14 @@ impl IlpForwarder {
         let tag_name = snapshot
             .table_registry()
             .shard_key_for(measurement, state.metadata.default_shard_key());
-        let key = shard_key_from_ilp_cow(line, &tag_name);
-        let shard = state.route_key(key.as_ref(), Protocol::Ilp)?;
+        let key = shard_key_from_ilp_cow(line, tag_name.as_ref());
+        let shard = snapshot.shard_for_key(key.as_ref(), Protocol::Ilp)?;
         let shard_id = shard.id;
+        let ilp_addr = shard.ilp_address.as_str().to_owned();
+        drop(snapshot);
 
         if !self.upstreams.contains_key(&shard_id) {
-            let stream = TcpStream::connect(shard.ilp_address.as_str()).await?;
+            let stream = TcpStream::connect(&ilp_addr).await?;
             self.upstreams.insert(
                 shard_id,
                 ShardUpstream {
