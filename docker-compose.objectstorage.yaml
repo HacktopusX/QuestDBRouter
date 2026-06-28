@@ -2,7 +2,6 @@ services:
   questdb-0:
     image: questdb/questdb:latest
     container_name: questdb-0
-    # Docker Desktop/WSL pins vm.max_map_count=262144; raise it before QuestDB starts.
     privileged: true
     entrypoint:
       - /bin/sh
@@ -60,6 +59,22 @@ services:
         max-file: "5"
     restart: unless-stopped
 
+  questdb-init:
+    image: postgres:16-alpine
+    container_name: questdb-init
+    depends_on:
+      questdb-0:
+        condition: service_started
+      questdb-1:
+        condition: service_started
+    environment:
+      QUESTDB_SHARDS: questdb-0:8812 questdb-1:8812
+      PGPASSWORD: quest
+    volumes:
+      - ./scripts/questdb_init_ingest_tables.sh:/scripts/questdb_init_ingest_tables.sh:ro
+    entrypoint: ["/bin/sh", "/scripts/questdb_init_ingest_tables.sh"]
+    restart: "no"
+
   quest-router:
     build:
       context: .
@@ -72,22 +87,36 @@ services:
       - "8812:8812"
       - "9090:9090"
       - "8080:8080"
+      - "9010:9010"
     depends_on:
-      - questdb-0
-      - questdb-1
+      questdb-0:
+        condition: service_started
+      questdb-1:
+        condition: service_started
+      questdb-init:
+        condition: service_completed_successfully
     volumes:
-      - ./config/docker-quest-router.toml:/config/quest-router.toml:ro
+      - ./config/docker-quest-router-objectstorage.toml:/config/quest-router.toml:ro
+      - ingest-checkpoint:/var/lib/quest-router
     restart: unless-stopped
 
   rustfs:
     image: rustfs/rustfs:latest
     container_name: rustfs
-    volumes:
-      - rustfs-data:/data
+    command: /data
+    environment:
+      - RUSTFS_ACCESS_KEY=rustfsadmin
+      - RUSTFS_SECRET_KEY=rustfsadmin
+      - RUSTFS_CONSOLE_ENABLE=true
     ports:
       - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - rustfs-data:/data
+    restart: unless-stopped
 
 volumes:
   questdb-0-data:
   questdb-1-data:
   rustfs-data:
+  ingest-checkpoint:

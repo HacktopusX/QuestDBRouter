@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use tokio::sync::{mpsc, watch};
-use tracing::{debug, instrument};
+use tracing::{debug, instrument, warn};
 
 use crate::config::{Config, PgAuthConfig};
 use crate::metrics;
@@ -28,14 +28,18 @@ pub struct MetadataHandle {
 
 impl MetadataHandle {
     pub async fn report_health(&self, shard_id: u32, ilp_ok: bool, pg_ok: bool) {
-        let _ = self
+        if self
             .tx
             .send(MetadataMessage::ReportHealth {
                 shard_id,
                 ilp_ok,
                 pg_ok,
             })
-            .await;
+            .await
+            .is_err()
+        {
+            warn!("metadata mailbox full, health update dropped");
+        }
     }
 }
 
@@ -179,6 +183,7 @@ mod tests {
             },
             metrics: Default::default(),
             stream: Default::default(),
+            ingest: Default::default(),
         }
     }
 

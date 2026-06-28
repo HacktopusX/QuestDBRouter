@@ -1,5 +1,6 @@
 use crate::app::AppState;
 use crate::federated::arrow::first_cell_f64;
+use crate::federated::error::FederatedError;
 use crate::metrics;
 use crate::pool::ShardPgPool;
 use crate::routing::{AggKind, RoutePlan};
@@ -12,6 +13,7 @@ use std::time::Instant;
 
 pub mod aggregate;
 pub mod arrow;
+pub mod error;
 #[cfg(feature = "federated")]
 pub mod catalog;
 #[cfg(feature = "federated")]
@@ -37,14 +39,16 @@ impl FederatedExecutor {
 
     pub async fn execute_simple(&self, sql: &str, plan: &RoutePlan) -> PgWireResult<Vec<Response>> {
         if !self.state.config.routing.federated_enabled {
-            return Err(fed_err(
-                "federated queries are disabled; enable routing.federated_enabled",
-            ));
+            let e = FederatedError::Disabled;
+            tracing::warn!(plan = plan_label(plan), "federated execution rejected: {e}");
+            return Err(e.to_pgwire());
         }
 
         let start = Instant::now();
         let shard_ids = self.state.healthy_pg_shard_ids().map_err(|e| {
-            fed_err(format!("{e}"))
+            let fe = FederatedError::InsufficientHealthyShards;
+            tracing::warn!(plan = plan_label(plan), "federated execution rejected: {fe} ({e})");
+            fe.to_pgwire()
         })?;
         metrics::record_federated_query(plan_label(plan));
         metrics::record_federated_shards(shard_ids.len());
@@ -62,27 +66,24 @@ impl FederatedExecutor {
                 }
                 #[cfg(not(feature = "federated"))]
                 {
-                    Err(fed_err(
-                        "join queries require building with --features federated",
-                    ))
+                    let e = FederatedError::Disabled;
+                    tracing::warn!(plan = plan_label(plan), "federated execution rejected: {e}");
+                    Err(e.to_pgwire())
                 }
             }
             RoutePlan::SingleShard { .. } => {
-                Err(fed_err("single-shard plan routed to federated executor"))
+                let e = FederatedError::ShardQuery {
+                    shard_id: 0,
+                    message: "single-shard plan routed to federated executor".into(),
+                };
+                tracing::warn!(plan = plan_label(plan), "federated execution rejected: {e}");
+                Err(e.to_pgwire())
             }
         };
 
         metrics::record_merge_latency(start.elapsed().as_secs_f64());
         result
     }
-}
-
-pub(crate) fn fed_err(msg: impl Into<String>) -> pgwire::error::PgWireError {
-    pgwire::error::PgWireError::UserError(Box::new(pgwire::error::ErrorInfo::new(
-        "ERROR".into(),
-        "XX000".into(),
-        msg.into(),
-    )))
 }
 
 fn plan_label(plan: &RoutePlan) -> &'static str {
@@ -105,27 +106,46 @@ pub(crate) async fn query_all_shards(
         .map_err(|e| e.to_pgwire())?;
     let mut handles = Vec::with_capacity(shard_ids.len());
 
-    for shard_id in shard_ids {
-        let pool = executor.pool.clone();
-        let sql = sql.to_string();
-        handles.push(tokio::spawn(async move {
-            let mut client = pool
-                .acquire(shard_id)
-                .await
-                .map_err(|e| fed_err(e.to_string()))?;
-            let handler = DefaultSimpleQueryHandler::new();
-            let responses = client
-                .client_mut()
-                .simple_query(handler, &sql)
-                .await
-                .map_err(|e| fed_err(e.to_string()))?;
-            Ok::<_, pgwire::error::PgWireError>((shard_id, responses))
-        }));
-    }
+        for shard_id in shard_ids {
+            let pool = executor.pool.clone();
+            let sql = sql.to_string();
+            handles.push(tokio::spawn(async move {
+                let mut client = pool
+                    .acquire(shard_id)
+                    .await
+                    .map_err(|e| {
+                        tracing::warn!(shard_id, err = %e, "shard query failed");
+                        FederatedError::ShardQuery { shard_id, message: e.to_string() }.to_pgwire()
+                    })?;
+                let handler = DefaultSimpleQueryHandler::new();
+                let pg = client.client_mut().map_err(|e| {
+                    tracing::warn!(shard_id, err = %e, "shard query failed");
+                    FederatedError::ShardQuery { shard_id, message: e.to_string() }.to_pgwire()
+                })?;
+                match pg.simple_query(handler, &sql).await {
+                    Ok(responses) => Ok::<_, pgwire::error::PgWireError>((shard_id, responses)),
+                    Err(e) => {
+                        let wrapped = FederatedError::ShardQuery {
+                            shard_id,
+                            message: e.to_string(),
+                        }.to_pgwire();
+                        if crate::federated::arrow::is_missing_table_error(&wrapped) {
+                            Ok((shard_id, vec![]))
+                        } else {
+                            tracing::warn!(shard_id, err = %e, "shard query failed");
+                            Err(wrapped)
+                        }
+                    }
+                }
+            }));
+        }
 
     let mut out = Vec::with_capacity(handles.len());
     for handle in handles {
-        out.push(handle.await.map_err(|e| fed_err(e.to_string()))??);
+        out.push(handle.await.map_err(|e| {
+            tracing::warn!(err = %e, "federated merge failed");
+            FederatedError::ShardQuery { shard_id: 0, message: e.to_string() }.to_pgwire()
+        })??);
     }
     Ok(out)
 }
@@ -143,16 +163,20 @@ pub(crate) fn merge_query_responses(
                 ClientResponse::Query((_tag, f, rows)) => {
                     if let Some(ref existing) = fields {
                         if existing.len() != f.len() {
-                            return Err(fed_err("schema mismatch across shards"));
+                            let e = FederatedError::SchemaMismatch(
+                                format!("expected {} columns, got {}", existing.len(), f.len()),
+                            );
+                            tracing::warn!(err = %e, "federated merge failed");
+                            return Err(e.to_pgwire());
                         }
                     } else {
                         fields = Some(f);
                     }
                     for row in rows {
                         if all_rows.len() as u64 >= max_rows {
-                            return Err(fed_err(format!(
-                                "federated row limit exceeded ({max_rows})"
-                            )));
+                            let e = FederatedError::RowLimitExceeded { limit: max_rows as usize };
+                            tracing::warn!(err = %e, "federated merge failed");
+                            return Err(e.to_pgwire());
                         }
                         all_rows.push(row);
                     }
@@ -221,7 +245,11 @@ pub(crate) fn merge_scalar_aggregate(
     };
     encoder
         .encode_field(&text)
-        .map_err(|e| fed_err(e.to_string()))?;
+        .map_err(|e| {
+            let fe = FederatedError::ShardQuery { shard_id: 0, message: e.to_string() };
+            tracing::warn!(err = %fe, "federated merge failed");
+            fe.to_pgwire()
+        })?;
     let row = encoder.take_row();
 
     Ok(vec![Response::Query(QueryResponse::new(

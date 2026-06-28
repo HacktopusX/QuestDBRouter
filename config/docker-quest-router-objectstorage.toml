@@ -1,0 +1,110 @@
+# Docker compose config with RustFS object ingest enabled.
+
+[listen]
+ilp = "0.0.0.0:9009"
+pg = "0.0.0.0:8812"
+stream = "0.0.0.0:8080"
+
+[[shards]]
+id = 0
+ilp_address = "questdb-0:9009"
+pg_address = "questdb-0:8812"
+weight = 1
+virtual_nodes = 128
+
+[[shards]]
+id = 1
+ilp_address = "questdb-1:9009"
+pg_address = "questdb-1:8812"
+weight = 1
+virtual_nodes = 128
+
+[routing]
+shard_key = "symbol"
+federated_enabled = true
+max_federated_rows = 1000000
+scan_allow_order_by = false
+pg_pool_size = 4
+
+[[routing.tables]]
+name = "router_test_trades"
+sharded = true
+columns = [
+  { name = "symbol", type = "symbol" },
+  { name = "price", type = "double" },
+  { name = "volume", type = "double" },
+  { name = "ts", type = "timestamp" },
+]
+
+[[routing.tables]]
+name = "trade_ticks"
+sharded = true
+columns = [
+  { name = "symbol", type = "symbol" },
+  { name = "venue", type = "symbol" },
+  { name = "price", type = "double" },
+  { name = "size", type = "double" },
+  { name = "timestamp", type = "timestamp" },
+]
+
+[[routing.tables]]
+name = "quote_ticks"
+sharded = true
+columns = [
+  { name = "symbol", type = "symbol" },
+  { name = "venue", type = "symbol" },
+  { name = "bid", type = "double" },
+  { name = "ask", type = "double" },
+  { name = "bid_size", type = "double" },
+  { name = "ask_size", type = "double" },
+  { name = "timestamp", type = "timestamp" },
+]
+
+[pg]
+user = "admin"
+password = "quest"
+database = "qdb"
+
+[health_check]
+interval_secs = 5
+timeout_secs = 2
+exclude_unhealthy = true
+min_healthy_shards = 1
+
+[metrics]
+enabled = true
+address = "0.0.0.0:9090"
+
+[stream]
+enabled = true
+broadcast_capacity = 1024
+replay_window = 1000
+topic_tags = ["symbol"]
+topic_missing = "*"
+max_client_lag_drops = 50
+
+[ingest]
+enabled = true
+listen = "0.0.0.0:9010"
+mailbox_capacity = 256
+
+[ingest.rustfs]
+endpoint = "http://rustfs:9000"
+bucket = "market-data"
+prefix = "live/"
+access_key = "rustfsadmin"
+secret_key = "rustfsadmin"
+region = "us-east-1"
+allow_http = true
+
+[ingest.checkpoint]
+path = "/var/lib/quest-router/ingest.checkpoint.json"
+
+[ingest.reconcile]
+enabled = true
+interval_secs = 300
+startup_scan = true
+
+[ingest.nautilus]
+trade_table = "trade_ticks"
+quote_table = "quote_ticks"

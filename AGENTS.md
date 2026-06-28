@@ -16,7 +16,7 @@
 - Shard endpoints use hostname-aware `host:port` strings, not `SocketAddr` — Docker names like `questdb-0:9009` fail with `invalid socket address syntax`.
 - `pgwire` 0.40+ needs rustc 1.89+; Docker/build images must match.
 - Hybrid federated SQL: `SingleShard` keyed reads passthrough to one QuestDB node; `FullScan` / `AggregateScan` / `Join` / `GroupBy` fan out via `FederatedExecutor` + DataFusion on Arrow batches.
-- Push SQL verbatim to each shard; DataFusion merges results only — do not let DataFusion replan QuestDB dialect (`count()`, `SAMPLE BY`, etc.).
+- Keyed QuestDB dialect (`SAMPLE BY`, `LATEST ON` with shard-key predicate) routes as single-shard verbatim passthrough via `routing/dialect.rs` + `protocol/pg_handlers.rs` (pre-parse intercept before datafusion-postgres).
 - Register sharded tables in config (`[[routing.tables]]` with `sharded = true`); set `federated_enabled`, `max_federated_rows`, `scan_allow_order_by`, `pg_pool_size` under `[routing]`.
 - PG session SQL (`BEGIN`, `COMMIT`, `ROLLBACK`, `SET`, etc.) must passthrough — psycopg2 opens implicit transactions and will fail if only `SELECT` is accepted.
 - Federated scans/joins use simple queries for now; extended-protocol prepared statements on federated paths return a clear error (keyed `$1` reads still work on single-shard path).

@@ -1,4 +1,4 @@
-use super::fed_err;
+use crate::federated::error::FederatedError;
 use crate::pool::PooledClient;
 use pgwire::api::client::query::{DefaultSimpleQueryHandler, Response as ClientResponse};
 use pgwire::api::results::FieldInfo;
@@ -15,6 +15,12 @@ fn is_connection_error(err: &PgWireError) -> bool {
         || msg.contains("unexpected remote message")
 }
 
+pub(crate) fn is_missing_table_error(err: &PgWireError) -> bool {
+    err.to_string()
+        .to_ascii_lowercase()
+        .contains("table does not exist")
+}
+
 /// Fetch query results from a single shard via the pool.
 pub async fn query_shard(
     pool: &crate::pool::ShardPgPool,
@@ -24,16 +30,23 @@ pub async fn query_shard(
     let mut client = pool
         .acquire(shard_id)
         .await
-        .map_err(|e| fed_err(e.to_string()))?;
+        .map_err(|e| {
+            tracing::warn!(shard_id, err = %e, "shard query failed");
+            FederatedError::ShardQuery { shard_id, message: e.to_string() }.to_pgwire()
+        })?;
     match query_shard_client(&mut client, sql).await {
         Ok(responses) => Ok(responses),
+        Err(e) if is_missing_table_error(&e) => Ok(vec![]),
         Err(e) if is_connection_error(&e) => {
             client.invalidate();
             drop(client);
             let mut client = pool
                 .acquire(shard_id)
                 .await
-                .map_err(|e| fed_err(e.to_string()))?;
+                .map_err(|e| {
+                    tracing::warn!(shard_id, err = %e, "shard query failed on reconnect");
+                    FederatedError::ShardQuery { shard_id, message: e.to_string() }.to_pgwire()
+                })?;
             query_shard_client(&mut client, sql).await
         }
         Err(e) => Err(e),
@@ -44,12 +57,19 @@ pub async fn query_shard_client(
     client: &mut PooledClient,
     sql: &str,
 ) -> Result<Vec<ClientResponse>, PgWireError> {
+    let shard_id = client.shard_id();
     let handler = DefaultSimpleQueryHandler::new();
     client
         .client_mut()
+        .map_err(|e| {
+            tracing::warn!(shard_id, err = %e, "shard query failed");
+            FederatedError::ShardQuery { shard_id, message: e.to_string() }.to_pgwire()
+        })?
         .simple_query(handler, sql)
         .await
-        .map_err(|e| fed_err(e.to_string()))
+        .map_err(|e| {
+            FederatedError::ShardQuery { shard_id, message: e.to_string() }.to_pgwire()
+        })
 }
 
 pub fn extract_query_rows(

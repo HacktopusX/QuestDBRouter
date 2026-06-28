@@ -7,7 +7,7 @@ use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 use thiserror::Error;
 
-use crate::routing::{AggKind, RoutePlan};
+use crate::routing::{classify_questdb_passthrough, has_questdb_extension, AggKind, RoutePlan};
 use crate::routing::schema::TableRegistry;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,6 +70,14 @@ pub fn classify_sql(
     registry: &TableRegistry,
     scan_allow_order_by: bool,
 ) -> Result<SqlClassify, SqlRouteError> {
+    if has_questdb_extension(sql) {
+        let plan = classify_questdb_passthrough(sql, shard_key_column)?;
+        if let RoutePlan::SingleShard { ref table, .. } = plan {
+            tracing::Span::current().record("table", table.as_str());
+        }
+        return Ok(SqlClassify::Routable(plan));
+    }
+
     let statement = parse_one_statement(sql)?;
     if is_passthrough_statement(&statement) {
         return Ok(SqlClassify::Passthrough);
@@ -513,5 +521,54 @@ mod tests {
     fn begin_is_passthrough() {
         let kind = classify_sql("BEGIN", "symbol", &registry(), false).unwrap();
         assert_eq!(kind, SqlClassify::Passthrough);
+    }
+
+    #[test]
+    fn questdb_sample_by_keyed_is_single_shard() {
+        let plan = plan_sql(
+            "SELECT ts, count() FROM trades WHERE symbol = 'BTC' SAMPLE BY 1h",
+            "symbol",
+            &registry(),
+            false,
+        )
+        .unwrap();
+        assert!(matches!(
+            plan,
+            RoutePlan::SingleShard {
+                shard_key: Some(ref k),
+                ..
+            } if k == "BTC"
+        ));
+    }
+
+    #[test]
+    fn questdb_sample_by_unkeyed_is_unsupported() {
+        let err = plan_sql(
+            "SELECT ts FROM trades SAMPLE BY 1h",
+            "symbol",
+            &registry(),
+            false,
+        )
+        .unwrap_err();
+        assert!(matches!(err, SqlRouteError::Unsupported(_)));
+        assert!(err.to_string().contains("questdb dialect:"));
+    }
+
+    #[test]
+    fn questdb_latest_on_keyed_is_single_shard() {
+        let plan = plan_sql(
+            "SELECT symbol, price FROM trades WHERE symbol = 'ETH' LATEST ON ts PARTITION BY symbol",
+            "symbol",
+            &registry(),
+            false,
+        )
+        .unwrap();
+        assert!(matches!(
+            plan,
+            RoutePlan::SingleShard {
+                shard_key: Some(ref k),
+                ..
+            } if k == "ETH"
+        ));
     }
 }

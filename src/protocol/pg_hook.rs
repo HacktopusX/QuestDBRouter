@@ -15,11 +15,13 @@ use tracing::instrument;
 use crate::app::{AppState, ResolvedRoute};
 use crate::federated::catalog::TableCatalog;
 use crate::metrics;
+use crate::protocol::request_id;
 use crate::routing::RoutingError;
 
 use super::pg_backend::{
     inline_sql_params, query_shard_pool, read_only_err, relay_passthrough, routing_err, wire_err,
 };
+use super::pg_handlers::DialectSqlStore;
 
 pub struct RouterQueryHook {
     state: AppState,
@@ -57,6 +59,9 @@ impl RouterQueryHook {
             Err(RoutingError::Unsupported(msg)) if msg.contains("only read queries") => {
                 Some(Err(RoutingError::Unsupported(msg)))
             }
+            Err(RoutingError::Unsupported(msg)) if msg.contains("questdb dialect:") => {
+                Some(Err(RoutingError::Unsupported(msg)))
+            }
             Err(RoutingError::Parse(_)) | Err(RoutingError::Unsupported(_)) => None,
             Err(e) => Some(Err(e)),
         }
@@ -77,11 +82,33 @@ impl RouterQueryHook {
         )
     }
 
-    fn dummy_plan() -> LogicalPlan {
+    pub fn dummy_plan() -> LogicalPlan {
         LogicalPlan::EmptyRelation(EmptyRelation {
             produce_one_row: false,
             schema: Arc::new(DFSchema::empty()),
         })
+    }
+
+    /// Route raw SQL (used for QuestDB dialect before datafusion-postgres parses it).
+    pub async fn handle_raw_sql<C: HookClient>(
+        &self,
+        sql: &str,
+        params: Option<&[String]>,
+        client: &mut C,
+    ) -> Option<PgWireResult<Response>> {
+        if let Some(err) = self.ensure_datafusion_tables(sql) {
+            return Some(Err(err));
+        }
+        self.handle_routed_sql(sql, params, client).await
+    }
+
+    fn take_dialect_sql<C: ClientInfo + ?Sized>(client: &C) -> Option<String> {
+        let ext = client.session_extensions();
+        let sql = ext.get::<DialectSqlStore>().and_then(|store| store.0.clone());
+        if sql.is_some() {
+            ext.insert(DialectSqlStore(None));
+        }
+        sql
     }
 
     fn params_to_strings(params: &ParamValues) -> Vec<String> {
@@ -101,24 +128,43 @@ impl RouterQueryHook {
         }
     }
 
-    #[instrument(name = "pg.route", skip(self, client), fields(shard_id))]
+    #[instrument(name = "pg.route", skip(self, client), fields(shard_id, request_id))]
     async fn handle_routed_sql(
         &self,
         sql: &str,
         params: Option<&[String]>,
         client: &mut dyn HookClient,
     ) -> Option<PgWireResult<Response>> {
+        let _start = std::time::Instant::now();
+        let req_id = request_id::next_request_id();
+        tracing::Span::current().record("request_id", req_id);
+
         let resolved = match self.try_resolve_hook_route(sql, params) {
-            None => return None,
-            Some(Err(RoutingError::Unsupported(msg))) if msg.contains("only read queries") => {
-                return Some(Err(read_only_err()));
+            None => {
+                return None;
             }
-            Some(Err(e)) => return Some(Err(routing_err(e))),
+            Some(Err(RoutingError::Unsupported(msg))) if msg.contains("only read queries") => {
+                tracing::warn!(request_id = req_id, sql = %sql, "write query rejected (read-only route)");
+                let result = Some(Err(read_only_err()));
+                metrics::record_duration("pg", _start.elapsed().as_secs_f64());
+                return result;
+            }
+            Some(Err(e)) => {
+                tracing::warn!(request_id = req_id, err = %e, "routing error returned to client");
+                let result = Some(Err(routing_err(e)));
+                metrics::record_duration("pg", _start.elapsed().as_secs_f64());
+                return result;
+            }
             Some(Ok(route)) => route,
         };
 
-        match resolved {
-            ResolvedRoute::Passthrough => Some(relay_passthrough(&self.state, client, sql).await),
+        let result = match resolved {
+            ResolvedRoute::Passthrough => {
+                Some(relay_passthrough(&self.state, client, sql).await.map_err(|e| {
+                    tracing::warn!(request_id = req_id, err = %e, "routing error returned to client");
+                    e
+                }))
+            }
             ResolvedRoute::Single(shard) => {
                 tracing::Span::current().record("shard_id", shard.id);
                 metrics::record_request("read", Some(shard.id));
@@ -127,10 +173,16 @@ impl RouterQueryHook {
                     _ => sql.to_string(),
                 };
                 let responses = query_shard_pool(&self.state.pg_pool, shard.id, &backend_sql).await;
-                Some(responses.and_then(|r| super::pg_backend::first_response(r)))
+                Some(responses.and_then(|r| super::pg_backend::first_response(r)).map_err(|e| {
+                    tracing::warn!(request_id = req_id, err = %e, "routing error returned to client");
+                    e
+                }))
             }
             ResolvedRoute::Federated(_) => None,
-        }
+        };
+
+        metrics::record_duration("pg", _start.elapsed().as_secs_f64());
+        result
     }
 }
 
@@ -158,11 +210,13 @@ impl QueryHook for RouterQueryHook {
     {
         Box::pin(async move {
             if Self::is_write_statement(statement) {
+                tracing::warn!(sql = %statement, "write statement rejected (read-only)");
                 return Some(Err(read_only_err()));
             }
 
             let sql = statement.to_string();
             if let Some(err) = self.ensure_datafusion_tables(&sql) {
+                tracing::warn!(err = %err, "routing error returned to client");
                 return Some(Err(err));
             }
             self.handle_routed_sql(&sql, None, client).await
@@ -189,6 +243,7 @@ impl QueryHook for RouterQueryHook {
 
             let sql = statement.to_string();
             if let Some(err) = self.ensure_datafusion_tables(&sql) {
+                tracing::warn!(err = %err, "routing error returned to client");
                 return Some(Err(err));
             }
             match self.try_resolve_hook_route(&sql, None) {
@@ -200,9 +255,13 @@ impl QueryHook for RouterQueryHook {
                 Some(Err(RoutingError::Unsupported(msg)))
                     if msg.contains("only read queries") =>
                 {
+                    tracing::warn!(sql = %sql, "write query rejected in extended parse (read-only)");
                     Some(Err(read_only_err()))
                 }
-                Some(Err(e)) => Some(Err(routing_err(e))),
+                Some(Err(e)) => {
+                    tracing::warn!(err = %e, "routing error in extended parse returned to client");
+                    Some(Err(routing_err(e)))
+                }
             }
         })
     }
@@ -226,12 +285,14 @@ impl QueryHook for RouterQueryHook {
     {
         Box::pin(async move {
             if Self::is_write_statement(statement) {
+                tracing::warn!(sql = %statement, "write statement rejected in extended query (read-only)");
                 return Some(Err(read_only_err()));
             }
 
-            let sql = statement.to_string();
+            let sql = Self::take_dialect_sql(client).unwrap_or_else(|| statement.to_string());
             let param_strings = Self::params_to_strings(params);
             if let Some(err) = self.ensure_datafusion_tables(&sql) {
+                tracing::warn!(err = %err, "routing error returned to client");
                 return Some(Err(err));
             }
             self.handle_routed_sql(&sql, Some(&param_strings), client)

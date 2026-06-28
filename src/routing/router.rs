@@ -127,6 +127,7 @@ mod tests {
             },
             metrics: Default::default(),
             stream: Default::default(),
+            ingest: Default::default(),
         }
     }
 

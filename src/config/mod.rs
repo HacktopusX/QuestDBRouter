@@ -14,6 +14,8 @@ pub struct Config {
     pub metrics: MetricsConfig,
     #[serde(default)]
     pub stream: StreamConfig,
+    #[serde(default)]
+    pub ingest: IngestConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -231,6 +233,144 @@ fn default_max_client_lag_drops() -> u32 {
     50
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct IngestConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    pub listen: Option<SocketAddr>,
+    #[serde(default = "default_ingest_mailbox_capacity")]
+    pub mailbox_capacity: usize,
+    #[serde(default)]
+    pub rustfs: RustFsConfig,
+    #[serde(default)]
+    pub checkpoint: IngestCheckpointConfig,
+    #[serde(default)]
+    pub reconcile: IngestReconcileConfig,
+    #[serde(default)]
+    pub nautilus: NautilusIngestConfig,
+}
+
+impl Default for IngestConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            listen: None,
+            mailbox_capacity: default_ingest_mailbox_capacity(),
+            rustfs: RustFsConfig::default(),
+            checkpoint: IngestCheckpointConfig::default(),
+            reconcile: IngestReconcileConfig::default(),
+            nautilus: NautilusIngestConfig::default(),
+        }
+    }
+}
+
+fn default_ingest_mailbox_capacity() -> usize {
+    256
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RustFsConfig {
+    pub endpoint: Option<String>,
+    pub bucket: Option<String>,
+    #[serde(default)]
+    pub prefix: String,
+    pub access_key: Option<String>,
+    pub secret_key: Option<String>,
+    #[serde(default = "default_rustfs_region")]
+    pub region: String,
+    #[serde(default = "default_true")]
+    pub allow_http: bool,
+}
+
+impl Default for RustFsConfig {
+    fn default() -> Self {
+        Self {
+            endpoint: None,
+            bucket: None,
+            prefix: String::new(),
+            access_key: None,
+            secret_key: None,
+            region: default_rustfs_region(),
+            allow_http: true,
+        }
+    }
+}
+
+fn default_rustfs_region() -> String {
+    "us-east-1".into()
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct IngestCheckpointConfig {
+    #[serde(default = "default_checkpoint_path")]
+    pub path: String,
+}
+
+impl Default for IngestCheckpointConfig {
+    fn default() -> Self {
+        Self {
+            path: default_checkpoint_path(),
+        }
+    }
+}
+
+fn default_checkpoint_path() -> String {
+    "./ingest.checkpoint.json".into()
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct IngestReconcileConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_reconcile_interval")]
+    pub interval_secs: u64,
+    #[serde(default = "default_true")]
+    pub startup_scan: bool,
+}
+
+impl Default for IngestReconcileConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            interval_secs: default_reconcile_interval(),
+            startup_scan: true,
+        }
+    }
+}
+
+fn default_reconcile_interval() -> u64 {
+    300
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct NautilusIngestConfig {
+    #[serde(default = "default_trade_table")]
+    pub trade_table: String,
+    #[serde(default = "default_quote_table")]
+    pub quote_table: String,
+}
+
+impl Default for NautilusIngestConfig {
+    fn default() -> Self {
+        Self {
+            trade_table: default_trade_table(),
+            quote_table: default_quote_table(),
+        }
+    }
+}
+
+fn default_trade_table() -> String {
+    "trade_ticks".into()
+}
+
+fn default_quote_table() -> String {
+    "quote_ticks".into()
+}
+
 impl Config {
     pub fn from_file(path: impl AsRef<Path>) -> anyhow::Result<Self> {
         let settings = config::Config::builder()
@@ -240,6 +380,9 @@ impl Config {
         let config: Self = settings.try_deserialize().map_err(anyhow::Error::from)?;
         if config.stream.enabled && config.listen.stream.is_none() {
             anyhow::bail!("stream.enabled requires listen.stream to be set");
+        }
+        if config.ingest.enabled && config.ingest.listen.is_none() {
+            anyhow::bail!("ingest.enabled requires ingest.listen to be set");
         }
         Ok(config)
     }

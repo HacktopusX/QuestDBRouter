@@ -1,6 +1,6 @@
 use datafusion::prelude::SessionContext;
 
-use super::{fed_err, FederatedExecutor};
+use super::{FederatedError, FederatedExecutor};
 use crate::federated::catalog::{bare_table_name, extract_table_names};
 use crate::federated::pg_types::{batches_to_pg_responses, schema_from_columns};
 use crate::federated::provider::QuestDbShardTableProvider;
@@ -22,11 +22,13 @@ pub async fn execute_sql_federated(
 
     for table in &tables {
         let bare = bare_table_name(table).to_string();
-        let table_cfg = registry
-            .get(&bare)
-            .ok_or_else(|| fed_err(format!("table {bare} is not configured in routing.tables")))?;
-        let schema = schema_from_columns(&table_cfg.columns)
-            .map_err(|e| fed_err(e.to_string()))?;
+        let table_cfg = registry.get(&bare).ok_or_else(|| {
+            FederatedError::SchemaMismatch(format!("table {bare} is not configured in routing.tables"))
+                .to_pgwire()
+        })?;
+        let schema = schema_from_columns(&table_cfg.columns).map_err(|e| {
+            FederatedError::SchemaMismatch(e.to_string()).to_pgwire()
+        })?;
         let provider = QuestDbShardTableProvider::new(
             bare.clone(),
             executor.clone(),
@@ -35,17 +37,29 @@ pub async fn execute_sql_federated(
             schema,
         );
         ctx.register_table(&bare, std::sync::Arc::new(provider))
-            .map_err(|e| fed_err(e.to_string()))?;
+            .map_err(|e| {
+                FederatedError::ShardQuery {
+                    shard_id: 0,
+                    message: e.to_string(),
+                }
+                .to_pgwire()
+            })?;
     }
 
-    let df = ctx
-        .sql(sql)
-        .await
-        .map_err(|e| fed_err(e.to_string()))?;
-    let batches = df
-        .collect()
-        .await
-        .map_err(|e| fed_err(e.to_string()))?;
+    let df = ctx.sql(sql).await.map_err(|e| {
+        FederatedError::ShardQuery {
+            shard_id: 0,
+            message: e.to_string(),
+        }
+        .to_pgwire()
+    })?;
+    let batches = df.collect().await.map_err(|e| {
+        FederatedError::ShardQuery {
+            shard_id: 0,
+            message: e.to_string(),
+        }
+        .to_pgwire()
+    })?;
 
     batches_to_pg_responses(batches)
 }

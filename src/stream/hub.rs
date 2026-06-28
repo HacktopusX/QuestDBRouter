@@ -10,6 +10,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::{broadcast, Notify};
+use tracing::warn;
 
 /// Pre-serialized tick shared across broadcast subscribers (one msgpack encode per publish).
 pub struct StreamTick {
@@ -69,6 +70,7 @@ impl BroadcastHub {
         }
 
         let Some(measurement) = measurement_from_ilp_bytes(line) else {
+            warn!("ILP parse failed in stream hub, dropping line");
             return;
         };
         if !is_broadcastable(measurement, &self.registry) {
@@ -76,6 +78,7 @@ impl BroadcastHub {
         }
 
         let Some(row) = parse_ilp_row(line) else {
+            warn!("ILP parse failed in stream hub, dropping line");
             return;
         };
 
@@ -195,7 +198,11 @@ impl BroadcastHub {
 }
 
 fn encode_tick(row: &IlpRow) -> Option<Arc<[u8]>> {
-    rmp_serde::to_vec_named(row)
-        .ok()
-        .map(|v| Arc::from(v.into_boxed_slice()))
+    match rmp_serde::to_vec_named(row) {
+        Ok(v) => Some(Arc::from(v.into_boxed_slice())),
+        Err(e) => {
+            warn!(err = %e, "tick encode failed, dropping");
+            None
+        }
+    }
 }

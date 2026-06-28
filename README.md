@@ -35,7 +35,7 @@ Contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for architectu
 
 ## Todo
 
-- [ ] Exclude unhealthy shards from routing (health checks today are log-only)
+- [x] Exclude unhealthy shards from routing (health checks update MetadataActor; routing skips bad nodes)
 - [ ] Load balancing policies beyond consistent hashing
 - [ ] Shard rebalancing and resharding support
 - [ ] Schema-aware routing

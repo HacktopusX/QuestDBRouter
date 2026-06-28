@@ -10,6 +10,7 @@ use crate::app::AppState;
 use crate::federated::pg_types::schema_from_columns;
 use crate::federated::provider::QuestDbShardTableProvider;
 use crate::federated::FederatedExecutor;
+use crate::routing::{extract_from_table, has_questdb_extension};
 
 /// Extract physical table references from a read query (best-effort).
 pub fn extract_table_names(sql: &str) -> Vec<String> {
@@ -109,7 +110,12 @@ impl TableCatalog {
     }
 
     pub fn ensure_tables_in_sql(&self, sql: &str) -> anyhow::Result<()> {
-        for qualified in extract_table_names(sql) {
+        let names = if has_questdb_extension(sql) {
+            extract_from_table(sql).into_iter().collect()
+        } else {
+            extract_table_names(sql)
+        };
+        for qualified in names {
             if is_system_relation(&qualified) {
                 continue;
             }

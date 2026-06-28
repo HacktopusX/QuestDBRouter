@@ -92,6 +92,8 @@ fn classify_sql_never_panics_on_arbitrary_input() {
         "INSERT INTO t VALUES (1)",
         "BEGIN",
         "SELECT * FROM trades WHERE symbol = 'X'",
+        "SELECT ts, count() FROM trades WHERE symbol = 'BTC' SAMPLE BY 1h",
+        "SELECT symbol, price FROM trades WHERE symbol = 'ETH' LATEST ON ts PARTITION BY symbol",
     ];
     for sql in samples {
         let _ = classify_sql(sql, "symbol", &registry, false);

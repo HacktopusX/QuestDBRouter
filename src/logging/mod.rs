@@ -1,55 +1,61 @@
-use fast_log::config::Config;
-use log::LevelFilter;
+use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
-const DEFAULT_CHAN_LEN: usize = 100_000;
-
-/// Initialize fast_log (`log::` macros) then tracing spans.
-///
-/// fast_log must install the global `log` logger first (it uses rbatis internally).
-/// Tracing is layered on afterward via `try_init` so it never panics if already set.
+/// Initialize unified logging: `log::` macros bridge into a single tracing subscriber.
 ///
 /// Log level is read from `RUST_LOG` (default: `info`).
-/// Optional file path via `QUEST_ROUTER__LOG__FILE`.
+/// Set `QUEST_ROUTER__LOG__FORMAT=json` for JSON output.
+/// Optional file path via `QUEST_ROUTER__LOG__FILE` (appends to file alongside stdout).
 pub fn init() -> anyhow::Result<()> {
-    let level = level_from_env();
-    let mut config = Config::new()
-        .console()
-        .level(level)
-        .chan_len(Some(DEFAULT_CHAN_LEN));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
-    if let Ok(path) = std::env::var("QUEST_ROUTER__LOG__FILE")
-        && !path.is_empty()
-    {
-        config = config.file(&path);
+    let json = std::env::var("QUEST_ROUTER__LOG__FORMAT")
+        .map(|v| v.eq_ignore_ascii_case("json"))
+        .unwrap_or(false);
+
+    let file_path = std::env::var("QUEST_ROUTER__LOG__FILE")
+        .ok()
+        .filter(|p| !p.is_empty());
+
+    match file_path {
+        Some(path) => {
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .map_err(|e| anyhow::anyhow!("failed to open log file {path}: {e}"))?;
+            let stdout_layer = if json {
+                fmt::layer().json().with_writer(std::io::stdout).boxed()
+            } else {
+                fmt::layer()
+                    .with_target(false)
+                    .with_writer(std::io::stdout)
+                    .boxed()
+            };
+            let file_layer = if json {
+                fmt::layer().json().with_writer(file).boxed()
+            } else {
+                fmt::layer().with_target(false).with_writer(file).boxed()
+            };
+            tracing_subscriber::registry()
+                .with(filter)
+                .with(stdout_layer)
+                .with(file_layer)
+                .try_init()
+                .map_err(|e| anyhow::anyhow!("failed to init tracing subscriber: {e}"))?;
+        }
+        None => {
+            let layer = if json {
+                fmt::layer().json().boxed()
+            } else {
+                fmt::layer().with_target(false).boxed()
+            };
+            tracing_subscriber::registry()
+                .with(filter)
+                .with(layer)
+                .try_init()
+                .map_err(|e| anyhow::anyhow!("failed to init tracing subscriber: {e}"))?;
+        }
     }
-
-    fast_log::init(config)
-        .map(|_| ())
-        .map_err(|e| anyhow::anyhow!("failed to init logging: {e}"))?;
-
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .try_init();
 
     Ok(())
-}
-
-fn level_from_env() -> LevelFilter {
-    match std::env::var("RUST_LOG")
-        .unwrap_or_else(|_| "info".into())
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "trace" => LevelFilter::Trace,
-        "debug" => LevelFilter::Debug,
-        "info" => LevelFilter::Info,
-        "warn" => LevelFilter::Warn,
-        "error" => LevelFilter::Error,
-        "off" => LevelFilter::Off,
-        _ => LevelFilter::Info,
-    }
 }

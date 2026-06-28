@@ -1,6 +1,7 @@
 pub mod app;
 pub mod config;
 pub mod federated;
+pub mod ingest;
 pub mod logging;
 pub mod metadata;
 pub mod metrics;

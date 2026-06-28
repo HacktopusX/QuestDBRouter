@@ -75,12 +75,15 @@ The hot path avoids unnecessary allocation where possible. Performance matters o
 
 For each client connection:
 
-1. Accept PostgreSQL wire protocol messages via `pgwire`.
-2. For simple queries, call `AppState::route_sql` to pick a shard (literal key in `WHERE`, or fallback).
-3. Lazily connect a `PgWireClient` to the chosen shard's `pg_address`.
-4. Relay the query and stream responses back to the client.
+1. `datafusion-postgres` accepts PostgreSQL wire protocol on `listen.pg`.
+2. `RouterQueryHook` classifies SQL via `QueryRouter` / `classify_sql`:
+   - **Single-shard** keyed reads → verbatim SQL to one shard via `ShardPgPool`
+   - **Session SQL** (`BEGIN`, `COMMIT`, `SET`, etc.) → sticky `pgwire` client relay
+   - **Federated** scans/aggregates → fan-out to healthy shards, merge in DataFusion
+   - **QuestDB dialect** (`SAMPLE BY`, `LATEST ON`) with shard-key predicate → single-shard verbatim passthrough
+3. Backend connections use `pgwire` as a **client** to each shard's `pg_address`.
 
-Session-level SQL (`BEGIN`, `COMMIT`, `SET`, etc.) must continue to work because real drivers (e.g. psycopg2) depend on them.
+Session-level SQL must continue to work because real drivers (e.g. psycopg2) depend on them.
 
 ### Shard selection
 
@@ -164,11 +167,18 @@ RUST_LOG=quest_router=debug,info cargo run -- --config config/docker-quest-route
 
 Areas that align with the [README todo](README.md#todo):
 
-- Wire health-check failures into routing (skip unhealthy shards)
-- Tests for SQL shard-key extraction edge cases
+- Tests for SQL shard-key extraction and QuestDB dialect edge cases
 - Documentation and config examples
 - Load-balancing policy options beyond consistent hashing
-- Federated query fan-out and result merging (larger feature — discuss in an issue first)
+- Unkeyed QuestDB dialect fan-out across shards (larger feature — discuss in an issue first)
+
+### Phase 1 sign-off checklist
+
+- `cargo test` (unit + `tests/phase1_routing.rs` + `tests/pgwire_contract.rs`)
+- `python scripts/test_router.py` (Docker stack)
+- `python scripts/test_health_routing.py` (optional)
+- `cargo test --test pgwire_live -- --ignored` (live PG contract, Docker required)
+- Prometheus `quest_router_shard_healthy` gauges on `:9090`
 
 ### Reporting bugs
 

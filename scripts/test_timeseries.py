@@ -8,9 +8,9 @@ For router-compatible SQL the test follows:
   3. Merge shard rows
   4. Assert router output == merged shards
 
-QuestDB-specific syntax (SAMPLE BY, LATEST ON, dateadd) cannot pass through the
-router parser yet — those checks run on the holding shard only and validate
-QuestDB behaviour after router ILP ingest.
+QuestDB-specific syntax (SAMPLE BY with shard-key predicate) routes through the router
+as single-shard verbatim passthrough. Unkeyed dialect (LATEST ON without WHERE key)
+still runs shard-only until multi-shard merge is implemented.
 
 Usage:
   docker compose up -d --build
@@ -170,15 +170,9 @@ def test_group_by_vs_shards() -> int:
     )
 
 
-def test_sample_by_hour(
-    symbol: str,
-    shard_port: int,
-    expected_hours: int,
-    ticks_per_hour: int,
-) -> int:
-    """SAMPLE BY is QuestDB dialect — router cannot parse; shard-only sanity check."""
+def sample_by_hour_sql(symbol: str) -> str:
     sym = sql_string(symbol)
-    sql = f"""
+    return f"""
         SELECT
             ts,
             first(price) AS open,
@@ -192,8 +186,58 @@ def test_sample_by_hour(
         SAMPLE BY 1h
         ORDER BY ts
     """
-    print(f"\n--- SAMPLE BY 1h (shard-only, symbol={symbol}, PG :{shard_port}) ---")
-    print("  note  router cannot parse SAMPLE BY — not compared to router")
+
+
+def test_sample_by_hour_router(
+    symbol: str,
+    expected_hours: int,
+    ticks_per_hour: int,
+) -> int:
+    """Keyed SAMPLE BY routes through router to the holding shard."""
+    sql = sample_by_hour_sql(symbol)
+    failures = compare_router_to_holding_shard(
+        f"SAMPLE BY 1h (router vs holding shard, symbol={symbol})",
+        sql,
+        TABLE,
+        symbol,
+    )
+    if failures:
+        return failures
+
+    shard_idx = shard_holding_symbol(symbol)
+    if shard_idx is None:
+        return 1
+    shard_port = SHARD_PG_PORTS[shard_idx]
+    try:
+        rows = query_shard(shard_port, sql)
+    except Exception as exc:
+        print(f"  FAIL  SAMPLE BY bucket validation: {exc}")
+        return 1
+
+    if len(rows) != expected_hours:
+        print(f"  FAIL  bucket count {len(rows)} != expected {expected_hours}")
+        return 1
+
+    total_ticks = sum(int(row[6]) for row in rows)
+    expected_total = expected_hours * ticks_per_hour
+    if total_ticks != expected_total:
+        print(f"  FAIL  tick sum {total_ticks} != expected {expected_total}")
+        return 1
+
+    print(f"  ok  {len(rows)} hourly buckets, {total_ticks} ticks total")
+    return 0
+
+
+def test_sample_by_hour(
+    symbol: str,
+    shard_port: int,
+    expected_hours: int,
+    ticks_per_hour: int,
+) -> int:
+    """Legacy shard-only SAMPLE BY validation (bucket semantics)."""
+    sym = sql_string(symbol)
+    sql = sample_by_hour_sql(symbol)
+    print(f"\n--- SAMPLE BY 1h bucket check (symbol={symbol}, PG :{shard_port}) ---")
     try:
         rows = query_shard(shard_port, sql)
     except Exception as exc:
@@ -228,17 +272,29 @@ def test_sample_by_hour(
     return 0
 
 
-def test_sample_by_minute(symbol: str, shard_port: int) -> int:
+def sample_by_minute_sql(symbol: str) -> str:
     sym = sql_string(symbol)
-    sql = f"""
+    return f"""
         SELECT ts, count() AS n, avg(price) AS avg_price
         FROM {TABLE}
         WHERE {SHARD_KEY} = {sym}
         SAMPLE BY 15m
         ORDER BY ts
     """
-    print(f"\n--- SAMPLE BY 15m (shard-only, symbol={symbol}, PG :{shard_port}) ---")
-    print("  note  router cannot parse SAMPLE BY — not compared to router")
+
+
+def test_sample_by_minute_router(symbol: str) -> int:
+    return compare_router_to_holding_shard(
+        f"SAMPLE BY 15m (router vs holding shard, symbol={symbol})",
+        sample_by_minute_sql(symbol),
+        TABLE,
+        symbol,
+    )
+
+
+def test_sample_by_minute(symbol: str, shard_port: int) -> int:
+    sql = sample_by_minute_sql(symbol)
+    print(f"\n--- SAMPLE BY 15m bucket check (symbol={symbol}, PG :{shard_port}) ---")
     try:
         rows = query_shard(shard_port, sql)
     except Exception as exc:
@@ -353,8 +409,12 @@ def main() -> int:
         print(f"\n  FAIL  symbol {test_symbol} not found on any shard")
         failures += 1
     else:
+        print("\n5. QuestDB dialect (keyed SAMPLE BY via router)...")
+        failures += test_sample_by_hour_router(
+            test_symbol, args.hours, args.ticks_per_hour
+        )
+        failures += test_sample_by_minute_router(test_symbol)
         shard_port = SHARD_PG_PORTS[shard_idx]
-        print(f"\n5. QuestDB dialect on shard-{shard_idx} (:{shard_port}) — no router compare...")
         failures += test_sample_by_hour(
             test_symbol, shard_port, args.hours, args.ticks_per_hour
         )

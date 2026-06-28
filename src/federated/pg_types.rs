@@ -15,7 +15,7 @@ use postgres_types::{Kind, Type};
 
 use crate::config::ColumnConfig;
 
-use super::fed_err;
+use super::FederatedError;
 
 /// Map a config column type name to Arrow (QuestDB dialect).
 pub fn config_type_to_arrow(type_name: &str) -> anyhow::Result<DataType> {
@@ -260,13 +260,21 @@ pub fn batches_to_pg_responses(batches: Vec<arrow::record_batch::RecordBatch>) -
 
     let schema = batches[0].schema();
     let fields = arrow_schema_to_pg_fields(schema.as_ref(), &Format::UnifiedText, None)
-        .map_err(|e| fed_err(e.to_string()))?;
+        .map_err(|e| {
+            FederatedError::SchemaMismatch(e.to_string()).to_pgwire()
+        })?;
     let fields_arc = Arc::new(fields);
 
     let mut rows = Vec::new();
     for batch in batches {
         for row_result in encode_recordbatch(fields_arc.clone(), batch) {
-            rows.push(row_result.map_err(|e| fed_err(e.to_string()))?);
+            rows.push(row_result.map_err(|e| {
+                FederatedError::ShardQuery {
+                    shard_id: 0,
+                    message: e.to_string(),
+                }
+                .to_pgwire()
+            })?);
         }
     }
 

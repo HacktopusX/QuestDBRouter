@@ -1,5 +1,6 @@
 use crate::app::backend_pg_config;
 use crate::config::{PgAuthConfig, ShardConfig};
+use crate::pool::PoolError;
 use pgwire::api::client::auth::DefaultStartupHandler;
 use pgwire::tokio::client::PgWireClient;
 use std::collections::HashMap;
@@ -44,14 +45,20 @@ impl ShardPgPool {
         ids
     }
 
-    pub async fn acquire(&self, shard_id: u32) -> anyhow::Result<PooledClient> {
+    pub async fn acquire(&self, shard_id: u32) -> Result<PooledClient, PoolError> {
         let sem = self
             .inner
             .semaphores
             .get(&shard_id)
             .cloned()
-            .ok_or_else(|| anyhow::anyhow!("unknown shard {shard_id}"))?;
-        let permit = sem.acquire_owned().await?;
+            .ok_or(PoolError::UnknownShard { shard_id })?;
+        let permit = sem.acquire_owned().await.map_err(|e| {
+            tracing::warn!(shard_id, err = %e, "shard PG semaphore closed");
+            PoolError::ConnectFailed {
+                shard_id,
+                source: Box::new(e),
+            }
+        })?;
         let client = {
             let mut guard = self.inner.clients.lock().await;
             if let Some(vec) = guard.get_mut(&shard_id) {
@@ -75,18 +82,30 @@ impl ShardPgPool {
         })
     }
 
-    async fn connect(&self, shard_id: u32) -> anyhow::Result<PgWireClient> {
+    async fn connect(&self, shard_id: u32) -> Result<PgWireClient, PoolError> {
         let shard = self
             .inner
             .shards
             .get(&shard_id)
-            .ok_or_else(|| anyhow::anyhow!("unknown shard {shard_id}"))?
+            .ok_or(PoolError::UnknownShard { shard_id })?
             .clone();
-        let config = backend_pg_config(&shard, &self.inner.auth)?;
+        let config = backend_pg_config(&shard, &self.inner.auth).map_err(|e| {
+            tracing::warn!(shard_id, err = %e, "shard PG config invalid");
+            PoolError::ConnectFailed {
+                shard_id,
+                source: e.into(),
+            }
+        })?;
         let startup = DefaultStartupHandler::new();
         PgWireClient::connect(Arc::new(config), startup, None)
             .await
-            .map_err(|e| anyhow::anyhow!("pg connect shard {shard_id}: {e}"))
+            .map_err(|e| {
+                tracing::warn!(shard_id, err = %e, "shard PG connect failed");
+                PoolError::ConnectFailed {
+                    shard_id,
+                    source: Box::new(e),
+                }
+            })
     }
 
     async fn release(&self, shard_id: u32, client: PgWireClient) {
@@ -107,8 +126,14 @@ pub struct PooledClient {
 }
 
 impl PooledClient {
-    pub fn client_mut(&mut self) -> &mut PgWireClient {
-        self.client.as_mut().expect("client taken")
+    pub fn shard_id(&self) -> u32 {
+        self.shard_id
+    }
+
+    pub fn client_mut(&mut self) -> Result<&mut PgWireClient, PoolError> {
+        self.client
+            .as_mut()
+            .ok_or(PoolError::ClientTaken { shard_id: self.shard_id })
     }
 
     /// Drop a dead connection instead of returning it to the pool.

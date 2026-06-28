@@ -46,6 +46,26 @@ pub fn init(config_enabled: bool, listen: Option<SocketAddr>) -> anyhow::Result<
         "quest_router_shard_healthy",
         "Shard health probe status (1=healthy, 0=unhealthy)"
     );
+    describe_counter!(
+        "quest_router_ingest_events_received_total",
+        "RustFS/S3 notification events accepted by ingest webhook"
+    );
+    describe_counter!(
+        "quest_router_ingest_objects_processed_total",
+        "Ingest objects processed by outcome"
+    );
+    describe_counter!(
+        "quest_router_ingest_rows_forwarded_total",
+        "ILP rows forwarded from object ingest by table"
+    );
+    describe_gauge!(
+        "quest_router_ingest_mailbox_depth",
+        "Current ingest actor mailbox depth"
+    );
+    describe_gauge!(
+        "quest_router_ingest_reconcile_lag_objects",
+        "Objects discovered by reconcile but not yet checkpointed"
+    );
 
     if config_enabled {
         let addr = listen.unwrap_or_else(|| "127.0.0.1:9090".parse().expect("valid addr"));
@@ -121,4 +141,44 @@ pub fn record_shard_health(shard_id: u32, protocol: &str, healthy: bool) {
         "protocol" => protocol.to_string(),
     )
     .set(if healthy { 1.0 } else { 0.0 });
+}
+
+pub fn record_ingest_events_received(source: crate::ingest::IngestSource, count: usize) {
+    counter!(
+        "quest_router_ingest_events_received_total",
+        "source" => ingest_source_label(source),
+    )
+    .increment(count as u64);
+}
+
+pub fn record_ingest_object_processed(source: crate::ingest::IngestSource, status: &str) {
+    counter!(
+        "quest_router_ingest_objects_processed_total",
+        "source" => ingest_source_label(source),
+        "status" => status.to_string(),
+    )
+    .increment(1);
+}
+
+pub fn record_ingest_rows_forwarded(table: &str, rows: u64) {
+    counter!(
+        "quest_router_ingest_rows_forwarded_total",
+        "table" => table.to_string(),
+    )
+    .increment(rows);
+}
+
+pub fn record_ingest_mailbox_depth(_bucket: &str, depth: usize) {
+    gauge!("quest_router_ingest_mailbox_depth").set(depth as f64);
+}
+
+pub fn record_ingest_reconcile_lag(count: usize) {
+    gauge!("quest_router_ingest_reconcile_lag_objects").set(count as f64);
+}
+
+fn ingest_source_label(source: crate::ingest::IngestSource) -> String {
+    match source {
+        crate::ingest::IngestSource::Webhook => "webhook".into(),
+        crate::ingest::IngestSource::Reconcile => "reconcile".into(),
+    }
 }
